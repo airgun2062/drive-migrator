@@ -53,6 +53,22 @@ pub enum EngineError {
     },
     #[error("failed to serialize fingerprint cache: {0}")]
     CacheSerialize(#[source] serde_json::Error),
+    #[error("{path} is not inside root {root}")]
+    PathNotUnderRoot { root: PathBuf, path: PathBuf },
+    #[error("failed to open journal {path}: {source}")]
+    JournalOpen {
+        path: PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("failed to create journal directory for {path}: {source}")]
+    JournalDirCreate {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("journal query failed: {0}")]
+    JournalQuery(#[source] rusqlite::Error),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
