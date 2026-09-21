@@ -426,12 +426,12 @@ fn clear_readonly(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return fs::set_permissions(path, fs::Permissions::from_mode(0o644)).map_err(|source| {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).map_err(|source| {
             EngineError::SetPermissions {
                 path: path.to_path_buf(),
                 source,
             }
-        });
+        })
     }
     #[cfg(not(unix))]
     {
