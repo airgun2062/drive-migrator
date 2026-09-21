@@ -40,6 +40,10 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
             continue;
         }
 
+        if is_ignored(dir_entry.file_name()) {
+            continue;
+        }
+
         let metadata = dir_entry.metadata().map_err(|err| {
             let source = err
                 .into_io_error()
@@ -79,4 +83,13 @@ pub fn scan_roots(roots: &[PathBuf]) -> Result<Vec<ScanEntry>> {
 
 fn io_other(message: &str) -> std::io::Error {
     std::io::Error::other(message.to_string())
+}
+
+/// Files never treated as part of a tree to analyze, reconcile, or copy
+/// (SPEC.md section 7's ignore list).
+fn is_ignored(file_name: &std::ffi::OsStr) -> bool {
+    match file_name.to_str() {
+        Some(name) => name == ".DS_Store" || name == "Thumbs.db" || name.starts_with("._"),
+        None => false,
+    }
 }

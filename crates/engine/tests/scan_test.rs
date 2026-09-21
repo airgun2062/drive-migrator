@@ -38,3 +38,17 @@ fn nonexistent_root_scans_as_empty() {
     let entries = scan_root(&tree.path().join("does-not-exist")).expect("scan should succeed");
     assert!(entries.is_empty());
 }
+
+#[test]
+fn ignores_known_junk_files() {
+    let tree = TempTree::new();
+    tree.write("keep.txt", b"real file");
+    tree.write(".DS_Store", b"mac junk");
+    tree.write("Thumbs.db", b"windows junk");
+    tree.write("._resource_fork", b"apple double junk");
+
+    let entries = scan_root(tree.path()).expect("scan should succeed");
+
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].path.ends_with("keep.txt"));
+}

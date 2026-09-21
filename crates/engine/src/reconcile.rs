@@ -73,6 +73,13 @@ pub fn plan(
     cache: &mut FingerprintCache,
     rules: &PreflightRules,
 ) -> Result<ReconcilePlan> {
+    if roots_are_nested(source_root, destination_root) {
+        return Err(EngineError::NestedRoots {
+            source_root: source_root.to_path_buf(),
+            destination_root: destination_root.to_path_buf(),
+        });
+    }
+
     let source_entries = relative_entries(source_root)?;
     let destination_entries = relative_entries(destination_root)?;
 
@@ -295,6 +302,20 @@ struct TaggedEntry {
     entry: RelativeEntry,
 }
 
+/// Best-effort check for one root sitting inside the other (SPEC.md section
+/// 3: "guard against a destination nested inside the source, or the
+/// reverse"). Uses `std::path::absolute` rather than `canonicalize`: the
+/// destination commonly does not exist yet (canonicalize would fail), and on
+/// Windows canonicalize prefixes an existing path with `\\?\`, which then no
+/// longer compares equal to a non-canonicalized path for the same location.
+/// `absolute` normalizes both consistently without touching the filesystem,
+/// at the cost of not resolving symlinks.
+fn roots_are_nested(a: &Path, b: &Path) -> bool {
+    let a = std::path::absolute(a).unwrap_or_else(|_| a.to_path_buf());
+    let b = std::path::absolute(b).unwrap_or_else(|_| b.to_path_buf());
+    a == b || a.starts_with(&b) || b.starts_with(&a)
+}
+
 fn relative_entries(root: &Path) -> Result<Vec<RelativeEntry>> {
     scan::scan_root(root)?
         .into_iter()
@@ -481,6 +502,22 @@ mod tests {
             normalize_key(Path::new("a.txt")),
             normalize_key(Path::new("b.txt"))
         );
+    }
+
+    #[test]
+    fn roots_are_nested_detects_a_destination_inside_the_source_even_when_it_does_not_exist_yet() {
+        let base = std::env::temp_dir().join(format!("migrator-nest-test-{}", std::process::id()));
+        let source = base.join("source");
+        let destination = source.join("nested_dest");
+        assert!(roots_are_nested(&source, &destination));
+    }
+
+    #[test]
+    fn roots_are_nested_is_false_for_sibling_roots() {
+        let base = std::env::temp_dir().join(format!("migrator-nest-test-{}", std::process::id()));
+        let source = base.join("source");
+        let destination = base.join("destination");
+        assert!(!roots_are_nested(&source, &destination));
     }
 
     #[test]

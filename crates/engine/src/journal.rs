@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{EngineError, Result};
 use crate::reconcile::{PartialReason, ReconcilePlan, ReconcileState};
+use crate::transfer::{TransferOutcome, TransferResult};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS plan_runs (
@@ -26,6 +27,18 @@ CREATE TABLE IF NOT EXISTS plan_entries (
 );
 
 CREATE INDEX IF NOT EXISTS plan_entries_run_id ON plan_entries(run_id);
+
+CREATE TABLE IF NOT EXISTS transfer_events (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES plan_runs(id),
+    relative_path TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    bytes INTEGER,
+    detail TEXT,
+    created_unix_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS transfer_events_run_id ON transfer_events(run_id);
 "#;
 
 /// Records intent and decisions in a SQLite (WAL mode) database (SPEC.md
@@ -119,6 +132,49 @@ impl Journal {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM plan_entries WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(EngineError::JournalQuery)
+    }
+
+    /// Records every attempted transfer (copied or failed) for a run.
+    pub fn record_transfer_results(
+        &mut self,
+        run_id: i64,
+        results: &[TransferResult],
+    ) -> Result<()> {
+        let tx = self.conn.transaction().map_err(EngineError::JournalQuery)?;
+        let created = unix_millis_now();
+
+        for result in results {
+            let outcome = match result.outcome {
+                TransferOutcome::Copied => "copied",
+                TransferOutcome::Failed => "failed",
+            };
+            tx.execute(
+                "INSERT INTO transfer_events (run_id, relative_path, outcome, bytes, detail, created_unix_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_id,
+                    result.relative_path.to_string_lossy(),
+                    outcome,
+                    result.bytes.map(|b| b as i64),
+                    result.detail,
+                    created,
+                ],
+            )
+            .map_err(EngineError::JournalQuery)?;
+        }
+
+        tx.commit().map_err(EngineError::JournalQuery)?;
+        Ok(())
+    }
+
+    pub fn count_transfer_events_for_run(&self, run_id: i64) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM transfer_events WHERE run_id = ?1",
                 params![run_id],
                 |row| row.get(0),
             )
