@@ -6,6 +6,7 @@ pub mod journal;
 pub mod policy;
 pub mod reconcile;
 pub mod scan;
+pub mod transfer;
 
 pub use analyze::{analyze, AnalyzeReport, DuplicateGroup};
 pub use cache::FingerprintCache;
@@ -14,3 +15,6 @@ pub use journal::Journal;
 pub use policy::{PreflightIssue, PreflightRules};
 pub use reconcile::{plan, PlanEntry, ReconcilePlan, ReconcileState};
 pub use scan::ScanEntry;
+pub use transfer::{
+    run, MovedPolicy, RunOptions, TransferOutcome, TransferResult, TransferSummary,
+};

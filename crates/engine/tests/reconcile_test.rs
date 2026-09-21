@@ -193,6 +193,23 @@ fn blocked_when_source_path_exceeds_the_configured_length_limit() {
 }
 
 #[test]
+fn rejects_a_destination_nested_inside_the_source() {
+    let tree = TempTree::new();
+    tree.write("source/a.txt", b"content");
+
+    let mut cache = FingerprintCache::default();
+    let err = plan(
+        &tree.path().join("source"),
+        &tree.path().join("source/nested_dest"),
+        &mut cache,
+        &PreflightRules::default(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, engine::EngineError::NestedRoots { .. }));
+}
+
+#[test]
 fn cache_reuse_does_not_change_the_classification() {
     let tree = TempTree::new();
     tree.write("source/a.txt", b"identical content here");

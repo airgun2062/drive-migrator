@@ -69,6 +69,44 @@ pub enum EngineError {
     },
     #[error("journal query failed: {0}")]
     JournalQuery(#[source] rusqlite::Error),
+    #[error("failed to create directory {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to fsync {path}: {source}")]
+    Fsync {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to rename {from} to {to}: {source}")]
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to remove {path}: {source}")]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("verification failed for {path}: the copied bytes do not match the source hash")]
+    VerifyMismatch { path: PathBuf },
+    #[error("source and destination roots must not be nested inside one another: {source_root} / {destination_root}")]
+    NestedRoots {
+        source_root: PathBuf,
+        destination_root: PathBuf,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
