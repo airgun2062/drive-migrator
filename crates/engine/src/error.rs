@@ -129,6 +129,24 @@ pub enum EngineError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("failed to parse {path} as JSON: {source}")]
+    JsonParse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to serialize canonical JSON for {path}: {source}")]
+    JsonSerialize {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to parse {path} as delimited rows: {source}")]
+    CsvParse {
+        path: PathBuf,
+        #[source]
+        source: csv::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
