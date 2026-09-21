@@ -2,7 +2,7 @@
 
 Rust workspace: a cross-platform (Linux, macOS, Windows) tool that transfers folder trees between drives with resume and verification, and finds duplicates, near duplicates, and document versions. The full design is in `SPEC.md`. Read only the section relevant to the current task, not the whole file.
 
-Current phase: P0 done, starting P1 (see SPEC.md section 11). Update this line when a phase is finished.
+Current phase: P1 done, starting P2 (see SPEC.md section 11). Update this line when a phase is finished.
 
 ## Hard rules
 
