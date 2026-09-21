@@ -188,7 +188,8 @@ MIGRATION_MANIFEST.json.sha256     checksum
 
 A hash is also stored in the app's own data folder on the machine.
 
-- SHA-256 over canonical JSON (sorted keys, UTF-8, LF line endings, no extra whitespace), so reformatting does not trigger false alarms.
+- SHA-256 over canonical JSON (sorted keys, UTF-8, LF line endings, no extra whitespace), so reformatting does not trigger false alarms. The hash is computed by re-parsing whatever is on disk and re-serializing it canonically, not by hashing the file's raw bytes, so the visible file itself can still be pretty-printed for readability.
+- Timestamps in the manifest (`created`) are Unix milliseconds, not RFC3339: no date/time crate is in section 10's candidate list, and this avoids adding one for formatting alone. Revisit if the GUI (P8) wants a human-readable string directly in the JSON.
 - On open, compare the visible manifest, the backup, and the app-local hash. Use a two-of-three vote and offer repair.
 - Set the read-only attribute on both files. Regenerate the JSON from the database if it is damaged.
 - A Verify command re-scans the destination and reports files moved, renamed, changed, or deleted since the migration.
@@ -203,7 +204,7 @@ Excerpt (schema v1):
 {
   "_warning": "GENERATED FILE. Edit at your own peril. The app checksums this file and will flag any change.",
   "format_version": 1,
-  "created": "2026-09-21T11:42:00-07:00",
+  "created_unix_ms": 1790032432429,
   "version_families": [
     {
       "family_id": "f_00412",

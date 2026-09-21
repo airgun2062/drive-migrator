@@ -107,6 +107,28 @@ pub enum EngineError {
         source_root: PathBuf,
         destination_root: PathBuf,
     },
+    #[error("failed to change permissions on {path}: {source}")]
+    SetPermissions {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to open manifest database {path}: {source}")]
+    ManifestDbOpen {
+        path: PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("manifest database query failed: {0}")]
+    ManifestDbQuery(#[source] rusqlite::Error),
+    #[error("failed to serialize manifest: {0}")]
+    ManifestSerialize(#[source] serde_json::Error),
+    #[error("manifest file {path} is not valid JSON: {source}")]
+    ManifestParse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

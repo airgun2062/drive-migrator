@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{EngineError, Result};
 
 /// Size of each sampled chunk read from the start and end of a file.
@@ -57,6 +59,42 @@ pub fn full_hash(path: &Path) -> Result<blake3::Hash> {
     }
 
     Ok(hasher.finalize())
+}
+
+/// Streams the whole file through SHA-256 with a fixed-size buffer, returning
+/// a lowercase hex digest. Used only for the manifest (SPEC.md section 4:
+/// "BLAKE3 for analysis, SHA-256 for the manifest"); duplicate detection
+/// elsewhere always uses BLAKE3.
+pub fn full_sha256_hex(path: &Path) -> Result<String> {
+    let mut file = open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; STREAM_BUFFER_BYTES];
+
+    loop {
+        let n = file.read(&mut buf).map_err(|source| EngineError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    Ok(encode_hex(&hasher.finalize()))
+}
+
+/// SHA-256 of an in-memory byte slice, as a lowercase hex digest.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    encode_hex(&Sha256::digest(bytes))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 fn open(path: &Path) -> Result<File> {
