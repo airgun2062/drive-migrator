@@ -1,1 +1,7 @@
 /target
+
+# Real, sensitive personal documents used for local manual testing only.
+# CLAUDE.md hard rule: never test against real user data; SPEC.md section 4
+# also says calibration data must be kept outside the repo. This must never
+# be committed or pushed.
+/testData
