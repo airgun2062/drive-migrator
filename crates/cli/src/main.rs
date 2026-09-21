@@ -3,9 +3,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use engine::{
-    analyze, plan, run as transfer_run, AnalyzeReport, EngineError, FingerprintCache, Journal,
-    MovedPolicy, PreflightRules, ReconcilePlan, ReconcileState, RunOptions, TransferOutcome,
-    TransferSummary,
+    analyze, plan, run as transfer_run, verify as verify_manifest, write_manifest, AnalyzeReport,
+    EngineError, FingerprintCache, Journal, MovedPolicy, PreflightRules, ReconcilePlan,
+    ReconcileState, RunOptions, TransferOutcome, TransferSummary, VerifyReport,
 };
 
 #[derive(Parser)]
@@ -32,6 +32,15 @@ enum Command {
     /// Reconcile, then copy every missing or partial file to the
     /// destination. The source is never modified.
     Run(RunArgs),
+
+    /// Write (or refresh) the tamper-evident manifest for a destination:
+    /// MIGRATION_MANIFEST.json, its checksum, a backup copy, and the SQLite
+    /// record of every file's SHA-256.
+    WriteManifest(WriteManifestArgs),
+
+    /// Re-scan a destination and report what changed since its manifest was
+    /// written: moved, renamed, changed, or deleted files.
+    Verify(VerifyArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -130,12 +139,36 @@ struct RunArgs {
     fat32: bool,
 }
 
+#[derive(clap::Args)]
+struct WriteManifestArgs {
+    destination: PathBuf,
+
+    /// Source root to record in the manifest, for reference only
+    #[arg(long)]
+    source: Option<PathBuf>,
+
+    /// Print the result as JSON instead of text
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct VerifyArgs {
+    destination: PathBuf,
+
+    /// Print the report as JSON instead of text
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Analyze(args) => run_analyze(args),
         Command::Plan(args) => run_plan(args),
         Command::Run(args) => run_run(args),
+        Command::WriteManifest(args) => run_write_manifest(args),
+        Command::Verify(args) => run_verify(args),
     }
 }
 
@@ -403,6 +436,108 @@ fn print_run_summary(summary: &TransferSummary) {
                 result.detail.as_deref().unwrap_or("unknown error")
             );
         }
+    }
+}
+
+fn run_write_manifest(args: WriteManifestArgs) -> ExitCode {
+    let result = match write_manifest(&args.destination, args.source.as_deref()) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if args.json {
+        match serde_json::to_string_pretty(&result) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!("error: failed to serialize result: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        println!(
+            "Wrote manifest for {} files ({}), {} duplicate group(s)",
+            result.file_count,
+            format_bytes(result.total_bytes),
+            result.duplicate_group_count
+        );
+        println!(
+            "{}: sha256:{}",
+            result.manifest_path.display(),
+            result.sha256
+        );
+        if !result.app_local_hash_recorded {
+            println!("warning: could not determine an app data directory; the app-local copy of the hash was not recorded");
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn run_verify(args: VerifyArgs) -> ExitCode {
+    let report = match verify_manifest(&args.destination) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if args.json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!("error: failed to serialize report: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        print_verify_report(&report);
+    }
+
+    if !report.integrity.trusted || !report.changed.is_empty() || !report.deleted.is_empty() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn print_verify_report(report: &VerifyReport) {
+    println!("Verify: {}", report.destination_root.display());
+    println!(
+        "manifest integrity: {}",
+        if report.integrity.trusted {
+            "trusted"
+        } else {
+            "NOT TRUSTED"
+        }
+    );
+    println!(
+        "unchanged {}  changed {}  moved {}  deleted {}  unrecorded {}",
+        report.unchanged,
+        report.changed.len(),
+        report.moved.len(),
+        report.deleted.len(),
+        report.unrecorded.len()
+    );
+
+    for c in &report.changed {
+        println!("[CHANGED] {}", c.relative_path.display());
+    }
+    for m in &report.moved {
+        println!(
+            "[MOVED] {} -> {}",
+            m.recorded_path.display(),
+            m.current_path.display()
+        );
+    }
+    for d in &report.deleted {
+        println!("[DELETED] {}", d.display());
+    }
+    for u in &report.unrecorded {
+        println!("[UNRECORDED] {}", u.display());
     }
 }
 
