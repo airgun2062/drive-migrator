@@ -13,7 +13,15 @@ pub struct ScanEntry {
 
 /// Walks `root` and returns every regular file found under it. Symlinks are
 /// not followed, so a link cycle cannot cause an infinite walk.
+///
+/// A root that does not exist yet scans as empty rather than erroring: a
+/// destination root not yet created is the normal case for a first-ever
+/// reconcile plan (SPEC.md section 3).
 pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
     let mut entries = Vec::new();
 
     for result in walkdir::WalkDir::new(root).follow_links(false) {

@@ -31,3 +31,10 @@ fn empty_root_yields_no_entries() {
     let entries = scan_root(tree.path()).expect("scan should succeed");
     assert!(entries.is_empty());
 }
+
+#[test]
+fn nonexistent_root_scans_as_empty() {
+    let tree = TempTree::new();
+    let entries = scan_root(&tree.path().join("does-not-exist")).expect("scan should succeed");
+    assert!(entries.is_empty());
+}
