@@ -5,3 +5,4 @@
 # also says calibration data must be kept outside the repo. This must never
 # be committed or pushed.
 /testData
+/data
