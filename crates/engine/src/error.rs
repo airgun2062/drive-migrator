@@ -147,6 +147,24 @@ pub enum EngineError {
         #[source]
         source: csv::Error,
     },
+    #[error("failed to open {path} as a zip archive: {source}")]
+    ZipOpen {
+        path: PathBuf,
+        #[source]
+        source: zip::result::ZipError,
+    },
+    #[error("failed to read {path} as a spreadsheet: {source}")]
+    XlsxRead {
+        path: PathBuf,
+        #[source]
+        source: calamine::Error,
+    },
+    #[error("failed to parse {path} as YAML: {source}")]
+    YamlParse {
+        path: PathBuf,
+        #[source]
+        source: yaml_rust2::ScanError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

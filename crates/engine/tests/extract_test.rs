@@ -26,9 +26,9 @@ fn classifies_supported_extensions() {
 
 #[test]
 fn unsupported_extensions_and_extensionless_files_are_not_classified() {
-    assert_eq!(classify(Path::new("a.docx")), None);
-    assert_eq!(classify(Path::new("a.xlsx")), None);
     assert_eq!(classify(Path::new("a.pdf")), None);
+    assert_eq!(classify(Path::new("a.xls")), None);
+    assert_eq!(classify(Path::new("a.doc")), None);
     assert_eq!(classify(Path::new("no_extension")), None);
 }
 

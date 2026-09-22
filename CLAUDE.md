@@ -2,7 +2,7 @@
 
 Rust workspace: a cross-platform (Linux, macOS, Windows) tool that transfers folder trees between drives with resume and verification, and finds duplicates, near duplicates, and document versions. The full design is in `SPEC.md`. Read only the section relevant to the current task, not the whole file.
 
-Current phase: P5 partial (see SPEC.md section 11). Text-first extraction (txt/md/html/json/csv/tsv/source code), MinHash/LSH candidate generation, and exact-containment coverage are done. Still open: docx/pptx/xlsx/xml/yaml extraction, T4 embeddings (blocked on a model choice benchmarked against real data), and the threshold calibration tool (blocked on ~200 hand-labeled pairs, kept outside the repo). Update this line when a phase is finished.
+Current phase: P5 partial (see SPEC.md section 11). Extraction (txt/md/html/json/csv/tsv/source code/docx/pptx/xlsx/xml/yaml/rtf), MinHash/LSH candidate generation, and exact-containment coverage are done. Still open, both blocked on human input rather than effort: T4 embeddings (needs a model choice benchmarked against real data) and the threshold calibration tool (needs ~200 hand-labeled real pairs, kept outside the repo). Update this line when a phase is finished.
 
 ## Hard rules
 
