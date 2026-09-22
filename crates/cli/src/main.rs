@@ -3,9 +3,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use engine::{
-    analyze, plan, run as transfer_run, verify as verify_manifest, write_manifest, AnalyzeReport,
-    EngineError, FingerprintCache, Journal, MovedPolicy, PreflightRules, ReconcilePlan,
-    ReconcileState, RunOptions, TransferOutcome, TransferSummary, VerifyReport,
+    analyze, find_similar, plan, run as transfer_run, verify as verify_manifest, write_manifest,
+    AnalyzeReport, EngineError, FingerprintCache, Journal, MovedPolicy, PreflightRules,
+    ReconcilePlan, ReconcileState, Relationship, RunOptions, SimilarityConfig, SimilarityReport,
+    TransferOutcome, TransferSummary, VerifyReport,
 };
 
 #[derive(Parser)]
@@ -41,6 +42,11 @@ enum Command {
     /// Re-scan a destination and report what changed since its manifest was
     /// written: moved, renamed, changed, or deleted files.
     Verify(VerifyArgs),
+
+    /// Find near-duplicate and contains/diverged relationships among
+    /// text-like files (txt, md, html, json, csv, tsv, source code).
+    /// Thresholds are uncalibrated defaults; see SPEC.md section 4.
+    Similar(SimilarArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -161,6 +167,26 @@ struct VerifyArgs {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct SimilarArgs {
+    /// Root directories to scan (one or two)
+    #[arg(required = true, num_args = 1..=2)]
+    roots: Vec<PathBuf>,
+
+    /// Print the report as JSON instead of text
+    #[arg(long)]
+    json: bool,
+
+    /// Minimum estimated Jaccard similarity for a pair to be reported
+    #[arg(long, default_value_t = SimilarityConfig::default().duplicate_cutoff)]
+    duplicate_cutoff: f64,
+
+    /// Coverage threshold used to call a direction "high" when classifying
+    /// a pair's relationship
+    #[arg(long, default_value_t = SimilarityConfig::default().high_coverage)]
+    high_coverage: f64,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -169,6 +195,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run_run(args),
         Command::WriteManifest(args) => run_write_manifest(args),
         Command::Verify(args) => run_verify(args),
+        Command::Similar(args) => run_similar(args),
     }
 }
 
@@ -538,6 +565,70 @@ fn print_verify_report(report: &VerifyReport) {
     }
     for u in &report.unrecorded {
         println!("[UNRECORDED] {}", u.display());
+    }
+}
+
+fn run_similar(args: SimilarArgs) -> ExitCode {
+    let config = SimilarityConfig {
+        duplicate_cutoff: args.duplicate_cutoff,
+        high_coverage: args.high_coverage,
+        ..SimilarityConfig::default()
+    };
+
+    let report = match find_similar(&args.roots, &config) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if args.json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!("error: failed to serialize report: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        print_similarity_report(&report);
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn print_similarity_report(report: &SimilarityReport) {
+    println!(
+        "Considered {} file(s), skipped {} unsupported format(s)",
+        report.files_considered, report.files_skipped_unsupported
+    );
+    println!(
+        "Thresholds are uncalibrated defaults (SPEC.md section 4) - review before acting on them."
+    );
+    println!("Found {} similar pair(s)", report.pairs.len());
+
+    for pair in &report.pairs {
+        println!(
+            "\n[{}] jaccard~{:.2}  {} -> {}: {:.2}  {} -> {}: {:.2}",
+            relationship_label(pair.relationship),
+            pair.jaccard_estimate,
+            pair.a.display(),
+            pair.b.display(),
+            pair.coverage_a_to_b,
+            pair.b.display(),
+            pair.a.display(),
+            pair.coverage_b_to_a
+        );
+    }
+}
+
+fn relationship_label(relationship: Relationship) -> &'static str {
+    match relationship {
+        Relationship::NearDuplicate => "NEAR-DUPLICATE",
+        Relationship::Diverged => "DIVERGED",
+        Relationship::AIsMoreComplete => "A-IS-MORE-COMPLETE",
+        Relationship::BIsMoreComplete => "B-IS-MORE-COMPLETE",
     }
 }
 

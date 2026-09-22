@@ -1,0 +1,5 @@
+Synthetic test document 4
+
+This is filler content generated for drive-migrator similarity testing. It has no meaning beyond exercising duplicate detection.
+
+lorem epsum

@@ -86,7 +86,7 @@ Also:
 Run the cheapest tiers first. Each tier sees only what survives the previous one.
 
 - **T1 Exact.** Group by size, then hash the first and last chunks, then a full BLAKE3 hash. Sampling may reject a candidate but never confirms one. BLAKE3 for analysis, SHA-256 for the manifest.
-- **T2 Perceptual (optional).** Images: pHash or dHash. Video: keyframe fingerprints aligned in time (ffmpeg; check its license before bundling). Evaluate `czkawka_core` (MIT) for this tier.
+- **T2 Perceptual (required for images).** Images: must detect crops, not just resizes/recompression/minor edits. A plain global pHash or dHash is resize- and recompression-robust but degrades on cropping, since it removes part of the image and shifts the rest rather than preserving overall structure; the algorithm choice needs to be evaluated against that requirement specifically, not assumed from "pHash is standard." Candidates to evaluate: crop-resistant/local perceptual hash variants, or feature-point matching (ORB/SIFT-style keypoint matching), which is more robust to cropping than a single global hash but a bigger lift. Final algorithm choice deferred; the requirement (must survive cropping) is not. Video: keyframe fingerprints aligned in time (ffmpeg; check its license before bundling), optional. Evaluate `czkawka_core` (MIT) for this tier.
 - **T3 Candidate generation for documents.** Shingle the text and use MinHash with LSH. Never compare all pairs.
 - **T4 Semantic.** Chunk documents by paragraph or section, embed with a small local model (ONNX Runtime, no network), and compare with cosine similarity on candidates only.
 
@@ -255,7 +255,7 @@ Each phase should leave something usable. P1 to P4 already give a safe, verified
 | P4 | Manifest, tamper evidence, and the Verify command |
 | P5 | Document extraction, MinHash, embeddings, coverage, and a threshold calibration tool |
 | P6 | Collapse mode, version families, archive option |
-| P7 | Large-file policy, protected classes, chunk resume, perceptual image and video tiers |
+| P7 | Large-file policy, protected classes, chunk resume, perceptual image tier (required, must detect crops - see section 4) and video tier (optional) |
 | P8 | Tauri GUI |
 
 ## 12. Open questions
@@ -264,3 +264,4 @@ Each phase should leave something usable. P1 to P4 already give a safe, verified
 - Embedding model: choose in P5 by benchmarking on the user's data.
 - Move mode is out of v1. Revisit after P6.
 - Two-machine operation (agents exchanging fingerprints) is deferred to v2.
+- Perceptual image matching algorithm (T2): required capability confirmed, must survive cropping specifically (not just resize/recompression). Choose in P7 by evaluating candidates (crop-resistant hash variants vs. feature-point/keypoint matching) against real test images, since a plain global pHash/dHash is known to degrade on crops.
