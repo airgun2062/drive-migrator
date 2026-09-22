@@ -14,6 +14,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Tauri (crates/gui) links against the system webview on Linux; the
+      # other two platforms use an OS-provided webview and need nothing extra.
+      - name: Install Tauri Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/gui-frontend/package-lock.json
+      # crates/gui's build.rs embeds crates/gui-frontend/dist at compile time
+      # (tauri::generate_context!), so the frontend must be built before any
+      # cargo command touches the gui crate.
+      - name: Build GUI frontend
+        working-directory: crates/gui-frontend
+        run: |
+          npm ci
+          npm run build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

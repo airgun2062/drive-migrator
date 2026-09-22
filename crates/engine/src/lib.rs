@@ -34,6 +34,7 @@ pub use reconcile::{plan, PlanEntry, ReconcilePlan, ReconcileState};
 pub use scan::ScanEntry;
 pub use similarity::{find_similar, Relationship, SimilarPair, SimilarityConfig, SimilarityReport};
 pub use transfer::{
-    run, MovedPolicy, RunOptions, TransferOutcome, TransferResult, TransferSummary,
+    run, run_with_progress, MovedPolicy, RunOptions, TransferOutcome, TransferResult,
+    TransferSummary,
 };
 pub use versions::{build_version_report, RankedMember, VersionFamily, VersionReport};

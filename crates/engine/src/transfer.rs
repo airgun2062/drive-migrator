@@ -60,6 +60,18 @@ pub struct TransferSummary {
 /// `Verified`, `Conflict`, `Blocked`, and `DestinationOnly` entries are never
 /// touched. A single file's failure does not stop the rest of the run.
 pub fn run(plan: &ReconcilePlan, options: &RunOptions) -> Result<TransferSummary> {
+    run_with_progress(plan, options, |_| {})
+}
+
+/// Same as `run`, but calls `on_progress` once for every file actually
+/// copied or attempted (not for entries left untouched: Verified, Conflict,
+/// Blocked, DestinationOnly, or a skipped Moved). Used to drive a live
+/// progress display; `run` is `run_with_progress` with a no-op callback.
+pub fn run_with_progress(
+    plan: &ReconcilePlan,
+    options: &RunOptions,
+    mut on_progress: impl FnMut(&TransferResult),
+) -> Result<TransferSummary> {
     discard_stale_part_files(&plan.destination_root)?;
 
     let mut summary = TransferSummary::default();
@@ -72,10 +84,20 @@ pub fn run(plan: &ReconcilePlan, options: &RunOptions) -> Result<TransferSummary
             ReconcileState::DestinationOnly => {}
             ReconcileState::Moved { .. } => match options.on_moved {
                 MovedPolicy::Leave => summary.skipped_moved += 1,
-                MovedPolicy::Copy => copy_entry(entry, &plan.destination_root, &mut summary),
+                MovedPolicy::Copy => copy_entry(
+                    entry,
+                    &plan.destination_root,
+                    &mut summary,
+                    &mut on_progress,
+                ),
             },
             ReconcileState::Missing | ReconcileState::Partial { .. } => {
-                copy_entry(entry, &plan.destination_root, &mut summary);
+                copy_entry(
+                    entry,
+                    &plan.destination_root,
+                    &mut summary,
+                    &mut on_progress,
+                );
             }
         }
     }
@@ -83,7 +105,12 @@ pub fn run(plan: &ReconcilePlan, options: &RunOptions) -> Result<TransferSummary
     Ok(summary)
 }
 
-fn copy_entry(entry: &PlanEntry, destination_root: &Path, summary: &mut TransferSummary) {
+fn copy_entry(
+    entry: &PlanEntry,
+    destination_root: &Path,
+    summary: &mut TransferSummary,
+    on_progress: &mut impl FnMut(&TransferResult),
+) {
     let Some(source_path) = &entry.source_path else {
         return;
     };
@@ -110,6 +137,7 @@ fn copy_entry(entry: &PlanEntry, destination_root: &Path, summary: &mut Transfer
             }
         }
     };
+    on_progress(&result);
     summary.results.push(result);
 }
 
