@@ -212,3 +212,56 @@ fn verify_reports_an_unrecorded_file() {
     );
     assert_eq!(report.unchanged, 1);
 }
+
+#[test]
+fn write_manifest_populates_version_families_from_destination_content() {
+    let tree = TempTree::new();
+    let a_content = (0..30)
+        .map(|i| format!("core{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let b_content = format!(
+        "{a_content} {}",
+        (0..12)
+            .map(|i| format!("extra{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    tree.write("dest/a.txt", a_content.as_bytes());
+    tree.write("dest/b.txt", b_content.as_bytes());
+
+    let dest = tree.path().join("dest");
+    let result = write_manifest(&dest, None).unwrap();
+
+    assert_eq!(result.version_family_count, 1);
+
+    let manifest_json = fs::read_to_string(&result.manifest_path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+    let families = value["version_families"].as_array().unwrap();
+    assert_eq!(families.len(), 1);
+
+    let members = families[0]["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.iter().all(|m| m["status"] == "kept"));
+    // Rank 1 is the more complete member (b.txt).
+    let rank1 = members.iter().find(|m| m["rank"] == 1).unwrap();
+    assert_eq!(rank1["relative_path"], "b.txt");
+}
+
+#[test]
+fn write_manifest_reports_zero_version_families_for_unrelated_files() {
+    let tree = TempTree::new();
+    tree.write(
+        "dest/a.txt",
+        b"nothing in common with the other file at all",
+    );
+    tree.write(
+        "dest/b.txt",
+        b"a totally different sentence about something else",
+    );
+
+    let dest = tree.path().join("dest");
+    let result = write_manifest(&dest, None).unwrap();
+
+    assert_eq!(result.version_family_count, 0);
+}

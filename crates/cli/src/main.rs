@@ -3,8 +3,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use engine::{
-    analyze, find_similar, plan, run as transfer_run, verify as verify_manifest, write_manifest,
-    AnalyzeReport, EngineError, FingerprintCache, Journal, MovedPolicy, PreflightRules,
+    analyze, apply_collapse_to_plan, find_similar, plan, plan_collapse, run as transfer_run,
+    verify as verify_manifest, write_manifest, AnalyzeReport, CollapseAction, CollapseConfig,
+    CollapseReport, EngineError, FingerprintCache, Journal, MovedPolicy, PreflightRules,
     ReconcilePlan, ReconcileState, Relationship, RunOptions, SimilarityConfig, SimilarityReport,
     TransferOutcome, TransferSummary, VerifyReport,
 };
@@ -68,6 +69,15 @@ impl From<OnMoved> for MovedPolicy {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum TransferMode {
+    /// Copy every missing/partial file (default).
+    Copy,
+    /// Keep only the newest N versions per version family; exact
+    /// duplicates always collapse to one copy. See SPEC.md section 2.
+    Collapse,
+}
+
 #[derive(clap::Args)]
 struct AnalyzeArgs {
     /// Root directories to scan (one or two)
@@ -125,6 +135,27 @@ struct RunArgs {
     /// different destination path
     #[arg(long, value_enum, default_value_t = OnMoved::Leave)]
     on_moved: OnMoved,
+
+    /// Copy mode (default) or Collapse mode (keep-newest-N per version
+    /// family, exact duplicates always collapse to one copy)
+    #[arg(long, value_enum, default_value_t = TransferMode::Copy)]
+    mode: TransferMode,
+
+    /// Collapse mode: how many of the newest/most-complete versions per
+    /// family to keep
+    #[arg(long, default_value_t = CollapseConfig::default().keep_newest)]
+    keep_newest: usize,
+
+    /// Collapse mode: copy collapsed versions to _collapsed/<path> instead
+    /// of leaving them only on the source
+    #[arg(long)]
+    archive: bool,
+
+    /// Collapse mode: comma-separated extensions (no leading dot) that are
+    /// never collapsed as versions, only as exact duplicates - e.g. raw
+    /// research data (SPEC.md section 6)
+    #[arg(long, value_delimiter = ',')]
+    protected_extensions: Vec<String>,
 
     /// Fingerprint cache file to read and update. If omitted, no cache is
     /// read or written and every file is hashed fresh.
@@ -376,12 +407,34 @@ fn run_run(args: RunArgs) -> ExitCode {
 
     let rules = build_rules(args.max_path_length, args.fat32);
 
-    let report = match plan(&args.source, &args.destination, &mut cache, &rules) {
+    let mut report = match plan(&args.source, &args.destination, &mut cache, &rules) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
+    };
+
+    let collapse_report = if args.mode == TransferMode::Collapse {
+        let config = CollapseConfig {
+            keep_newest: args.keep_newest,
+            archive: args.archive,
+            protected_extensions: args
+                .protected_extensions
+                .iter()
+                .map(|e| e.to_ascii_lowercase())
+                .collect(),
+            similarity: SimilarityConfig::default(),
+        };
+        match plan_collapse(std::slice::from_ref(&args.source), &mut cache, &config) {
+            Ok(collapse) => Some(collapse),
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
     };
 
     if let Some(path) = &args.cache {
@@ -400,6 +453,9 @@ fn run_run(args: RunArgs) -> ExitCode {
         },
         None => None,
     };
+    // Records the full reconcile plan before any collapse filtering, so
+    // the journal keeps a complete picture of what reconcile found even
+    // when collapse mode later narrows what actually gets copied.
     let run_id = journal.as_mut().and_then(|j| match j.record_plan(&report) {
         Ok(id) => Some(id),
         Err(err) => {
@@ -407,6 +463,11 @@ fn run_run(args: RunArgs) -> ExitCode {
             None
         }
     });
+
+    if let Some(collapse) = &collapse_report {
+        apply_collapse_to_plan(&mut report, collapse);
+        print_collapse_summary(collapse);
+    }
 
     if args.dry_run {
         println!("Dry run: no files were copied.");
@@ -437,6 +498,41 @@ fn run_run(args: RunArgs) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn print_collapse_summary(collapse: &CollapseReport) {
+    println!(
+        "Collapse: {} version famil{}, {} file(s) kept, {} collapsed/archived ({} reclaimable)",
+        collapse.version_report.families.len(),
+        if collapse.version_report.families.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        collapse.files_kept,
+        collapse.files_collapsed,
+        format_bytes(collapse.bytes_saved)
+    );
+    if !collapse.version_report.flagged_for_manual_merge.is_empty() {
+        println!(
+            "  {} pair(s) flagged for manual merge (diverged content, never auto-collapsed)",
+            collapse.version_report.flagged_for_manual_merge.len()
+        );
+    }
+    for decision in &collapse.decisions {
+        if decision.action != CollapseAction::Keep {
+            println!(
+                "  [{}] {} ({:?})",
+                if decision.action == CollapseAction::Archive {
+                    "ARCHIVED"
+                } else {
+                    "COLLAPSED"
+                },
+                decision.path.display(),
+                decision.reason
+            );
+        }
     }
 }
 
@@ -485,10 +581,16 @@ fn run_write_manifest(args: WriteManifestArgs) -> ExitCode {
         }
     } else {
         println!(
-            "Wrote manifest for {} files ({}), {} duplicate group(s)",
+            "Wrote manifest for {} files ({}), {} duplicate group(s), {} version famil{}",
             result.file_count,
             format_bytes(result.total_bytes),
-            result.duplicate_group_count
+            result.duplicate_group_count,
+            result.version_family_count,
+            if result.version_family_count == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         );
         println!(
             "{}: sha256:{}",

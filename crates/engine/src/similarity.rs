@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::extract::{self, ExtractedDocument};
 use crate::scan;
+use crate::union_find::UnionFind;
 
 /// A prime close to 2^61, comfortably inside u64 and large enough that
 /// collisions between distinct 64-bit token hashes are negligible.
@@ -281,7 +282,7 @@ impl LshIndex {
                 uf.union(w[0], w[1]);
             }
         }
-        uf.groups()
+        uf.groups().into_iter().filter(|g| g.len() > 1).collect()
     }
 }
 
@@ -297,40 +298,4 @@ fn hash_u64_slice(values: &[u64]) -> u64 {
         out = (out << 8) | byte as u64;
     }
     out
-}
-
-struct UnionFind {
-    parent: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-        }
-    }
-
-    fn find(&mut self, x: usize) -> usize {
-        if self.parent[x] != x {
-            self.parent[x] = self.find(self.parent[x]);
-        }
-        self.parent[x]
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra != rb {
-            self.parent[ra] = rb;
-        }
-    }
-
-    fn groups(&mut self) -> Vec<Vec<usize>> {
-        let mut map: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..self.parent.len() {
-            let root = self.find(i);
-            map.entry(root).or_default().push(i);
-        }
-        map.into_values().filter(|g| g.len() > 1).collect()
-    }
 }

@@ -9,6 +9,8 @@ use serde::Serialize;
 use crate::error::{EngineError, Result};
 use crate::hash;
 use crate::scan;
+use crate::similarity::{self, SimilarityConfig};
+use crate::versions;
 
 const MANIFEST_FILENAME: &str = "MIGRATION_MANIFEST.json";
 const MANIFEST_CHECKSUM_FILENAME: &str = "MIGRATION_MANIFEST.json.sha256";
@@ -30,9 +32,29 @@ struct ManifestDocument {
     destination_root: String,
     summary: ManifestSummary,
     duplicate_groups: Vec<ManifestDuplicateGroup>,
-    /// Populated starting with collapse mode (SPEC.md roadmap P6); always
-    /// empty for now.
-    version_families: Vec<serde_json::Value>,
+    version_families: Vec<ManifestVersionFamily>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ManifestVersionFamily {
+    family_id: String,
+    members: Vec<ManifestVersionMember>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ManifestVersionMember {
+    rank: usize,
+    /// Always "kept" for now: this reflects the family structure of what
+    /// is currently at the destination, found by re-running `similar`
+    /// against it directly. A collapsed-and-not-archived file is, by
+    /// definition, absent from the destination, so it cannot appear here;
+    /// showing "collapsed" entries too would need the actual CollapseReport
+    /// from the run that produced this destination, which write_manifest
+    /// does not have (it is invoked as its own step, per CLAUDE.md's
+    /// pattern of keeping commands separate and deliberate).
+    status: &'static str,
+    relative_path: String,
+    modified_unix_millis: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +84,7 @@ pub struct ManifestWriteResult {
     pub file_count: usize,
     pub total_bytes: u64,
     pub duplicate_group_count: usize,
+    pub version_family_count: usize,
     pub manifest_path: PathBuf,
     pub sha256: String,
     pub app_local_hash_recorded: bool,
@@ -84,6 +107,8 @@ pub fn write_manifest(
 
     let duplicate_groups = group_duplicates(&files);
     let duplicate_group_count = duplicate_groups.len();
+    let version_families = build_version_families(destination_root);
+    let version_family_count = version_families.len();
 
     let created_unix_ms = unix_millis_now();
     let document = ManifestDocument {
@@ -98,7 +123,7 @@ pub fn write_manifest(
             duplicate_group_count,
         },
         duplicate_groups,
-        version_families: Vec::new(),
+        version_families,
     };
 
     write_db(destination_root, &document, &files)?;
@@ -118,6 +143,7 @@ pub fn write_manifest(
         file_count,
         total_bytes,
         duplicate_group_count,
+        version_family_count,
         manifest_path: manifest_path(destination_root),
         sha256,
         app_local_hash_recorded,
@@ -288,6 +314,46 @@ fn collect_file_records(destination_root: &Path) -> Result<Vec<ManifestFileRecor
     }
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(files)
+}
+
+/// Version-family structure among whatever is currently at the
+/// destination, by re-running `similar` directly against it. Every member
+/// found this way is present at the destination, hence always "kept" - see
+/// `ManifestVersionMember::status`'s doc comment for why collapsed entries
+/// cannot appear here.
+fn build_version_families(destination_root: &Path) -> Vec<ManifestVersionFamily> {
+    let Ok(similarity_report) = similarity::find_similar(
+        &[destination_root.to_path_buf()],
+        &SimilarityConfig::default(),
+    ) else {
+        return Vec::new();
+    };
+    let version_report = versions::build_version_report(&similarity_report.pairs);
+
+    version_report
+        .families
+        .iter()
+        .enumerate()
+        .map(|(index, family)| {
+            let members = family
+                .members
+                .iter()
+                .map(|m| {
+                    let relative = m.path.strip_prefix(destination_root).unwrap_or(&m.path);
+                    ManifestVersionMember {
+                        rank: m.rank,
+                        status: "kept",
+                        relative_path: relative.to_string_lossy().into_owned(),
+                        modified_unix_millis: m.date_unix_millis,
+                    }
+                })
+                .collect();
+            ManifestVersionFamily {
+                family_id: format!("f_{index:05}"),
+                members,
+            }
+        })
+        .collect()
 }
 
 fn group_duplicates(files: &[ManifestFileRecord]) -> Vec<ManifestDuplicateGroup> {

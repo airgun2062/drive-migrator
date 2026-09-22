@@ -2,7 +2,7 @@
 
 Rust workspace: a cross-platform (Linux, macOS, Windows) tool that transfers folder trees between drives with resume and verification, and finds duplicates, near duplicates, and document versions. The full design is in `SPEC.md`. Read only the section relevant to the current task, not the whole file.
 
-Current phase: P5 partial (see SPEC.md section 11). Extraction (txt/md/html/json/csv/tsv/source code/docx/pptx/xlsx/xml/yaml/rtf), MinHash/LSH candidate generation, and exact-containment coverage are done. Still open, both blocked on human input rather than effort: T4 embeddings (needs a model choice benchmarked against real data) and the threshold calibration tool (needs ~200 hand-labeled real pairs, kept outside the repo). Update this line when a phase is finished.
+Current phase: P6 done (see SPEC.md section 11). Collapse mode is implemented: metadata-based version dating (Office core properties, EXIF, email headers), version family construction/ranking (transitive completeness via coverage), collapse decisions (exact-duplicate collapse, keep-newest-N, protected classes, tips always kept), the `--archive` option, integration with the transfer pipeline, `migrator run --mode collapse`, and manifest population. Still open from P5, both blocked on human input rather than effort: T4 embeddings (needs a model choice benchmarked against real data) and the threshold calibration tool (needs ~200 hand-labeled real pairs, kept outside the repo). Next: P7, perceptual image matching (now required, not optional, per SPEC.md section 4 - must be crop-robust; algorithm choice deferred until evaluated against real test images). Update this line when a phase is finished.
 
 ## Hard rules
 
