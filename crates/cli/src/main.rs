@@ -5,9 +5,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use engine::{
     analyze, apply_collapse_to_plan, find_similar, plan, plan_collapse, run as transfer_run,
     verify as verify_manifest, write_manifest, AnalyzeReport, CollapseAction, CollapseConfig,
-    CollapseReport, EngineError, FingerprintCache, Journal, MovedPolicy, PreflightRules,
-    ReconcilePlan, ReconcileState, Relationship, RunOptions, SimilarityConfig, SimilarityReport,
-    TransferOutcome, TransferSummary, VerifyReport,
+    CollapseReport, FingerprintCache, Journal, Log, MovedPolicy, PreflightRules, ReconcilePlan,
+    ReconcileState, Relationship, RunOptions, SimilarityConfig, SimilarityReport, TransferOutcome,
+    TransferSummary, VerifyReport,
 };
 
 #[derive(Parser)]
@@ -216,6 +216,12 @@ struct SimilarArgs {
     /// a pair's relationship
     #[arg(long, default_value_t = SimilarityConfig::default().high_coverage)]
     high_coverage: f64,
+
+    /// Only compare files with these extensions (comma-separated, no dots,
+    /// case-insensitive - for example "pptx,docx,xlsx"). Omit to compare
+    /// every supported format.
+    #[arg(long, value_delimiter = ',')]
+    ext: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -230,10 +236,10 @@ fn main() -> ExitCode {
     }
 }
 
-fn load_cache(path: &Option<PathBuf>) -> std::result::Result<FingerprintCache, EngineError> {
+fn load_cache(path: &Option<PathBuf>) -> FingerprintCache {
     match path {
         Some(p) => FingerprintCache::load(p),
-        None => Ok(FingerprintCache::default()),
+        None => FingerprintCache::default(),
     }
 }
 
@@ -246,24 +252,27 @@ fn build_rules(max_path_length: usize, fat32: bool) -> PreflightRules {
 }
 
 fn run_analyze(args: AnalyzeArgs) -> ExitCode {
-    let mut cache = match &args.cache {
-        Some(path) => match FingerprintCache::load(path) {
-            Ok(cache) => cache,
-            Err(err) => {
-                eprintln!("error: {err}");
-                return ExitCode::FAILURE;
-            }
-        },
-        None => FingerprintCache::default(),
-    };
+    Log::info(
+        "cli.analyze",
+        &format!("started: {} root(s)", args.roots.len()),
+    );
+    let mut cache = load_cache(&args.cache);
 
     let report = match analyze(&args.roots, &mut cache) {
         Ok(report) => report,
         Err(err) => {
+            Log::error("cli.analyze", &format!("analyze failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
+    Log::info(
+        "cli.analyze",
+        &format!(
+            "finished: {} duplicate groups",
+            report.duplicate_groups.len()
+        ),
+    );
 
     if let Some(path) = &args.cache {
         if let Err(err) = cache.save(path) {
@@ -314,23 +323,27 @@ fn print_text_report(report: &AnalyzeReport) {
 }
 
 fn run_plan(args: PlanArgs) -> ExitCode {
-    let mut cache = match load_cache(&args.cache) {
-        Ok(cache) => cache,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    Log::info(
+        "cli.plan",
+        &format!(
+            "started: {} -> {}",
+            args.source.display(),
+            args.destination.display()
+        ),
+    );
+    let mut cache = load_cache(&args.cache);
 
     let rules = build_rules(args.max_path_length, args.fat32);
 
     let report = match plan(&args.source, &args.destination, &mut cache, &rules) {
         Ok(report) => report,
         Err(err) => {
+            Log::error("cli.plan", &format!("plan failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
+    Log::info("cli.plan", "finished");
 
     if let Some(path) = &args.cache {
         if let Err(err) = cache.save(path) {
@@ -397,19 +410,24 @@ fn print_plan_text_report(report: &ReconcilePlan) {
 }
 
 fn run_run(args: RunArgs) -> ExitCode {
-    let mut cache = match load_cache(&args.cache) {
-        Ok(cache) => cache,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    Log::info(
+        "cli.run",
+        &format!(
+            "started: {} -> {} (mode={:?}, dry_run={})",
+            args.source.display(),
+            args.destination.display(),
+            args.mode,
+            args.dry_run
+        ),
+    );
+    let mut cache = load_cache(&args.cache);
 
     let rules = build_rules(args.max_path_length, args.fat32);
 
     let mut report = match plan(&args.source, &args.destination, &mut cache, &rules) {
         Ok(report) => report,
         Err(err) => {
+            Log::error("cli.run", &format!("plan failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
@@ -429,6 +447,7 @@ fn run_run(args: RunArgs) -> ExitCode {
         match plan_collapse(std::slice::from_ref(&args.source), &mut cache, &config) {
             Ok(collapse) => Some(collapse),
             Err(err) => {
+                Log::error("cli.run", &format!("collapse plan failed: {err}"));
                 eprintln!("error: {err}");
                 return ExitCode::FAILURE;
             }
@@ -470,6 +489,7 @@ fn run_run(args: RunArgs) -> ExitCode {
     }
 
     if args.dry_run {
+        Log::info("cli.run", "dry run finished: no files copied");
         println!("Dry run: no files were copied.");
         print_plan_text_report(&report);
         return ExitCode::SUCCESS;
@@ -481,10 +501,18 @@ fn run_run(args: RunArgs) -> ExitCode {
     let summary = match transfer_run(&report, &options) {
         Ok(summary) => summary,
         Err(err) => {
+            Log::error("cli.run", &format!("transfer failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
+    Log::info(
+        "cli.run",
+        &format!(
+            "finished: {} copied, {} failed",
+            summary.copied, summary.failed
+        ),
+    );
 
     if let (Some(journal), Some(run_id)) = (journal.as_mut(), run_id) {
         if let Err(err) = journal.record_transfer_results(run_id, &summary.results) {
@@ -563,13 +591,22 @@ fn print_run_summary(summary: &TransferSummary) {
 }
 
 fn run_write_manifest(args: WriteManifestArgs) -> ExitCode {
+    Log::info(
+        "cli.write_manifest",
+        &format!("started: {}", args.destination.display()),
+    );
     let result = match write_manifest(&args.destination, args.source.as_deref()) {
         Ok(result) => result,
         Err(err) => {
+            Log::error("cli.write_manifest", &format!("failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
+    Log::info(
+        "cli.write_manifest",
+        &format!("finished: {} files", result.file_count),
+    );
 
     if args.json {
         match serde_json::to_string_pretty(&result) {
@@ -606,13 +643,27 @@ fn run_write_manifest(args: WriteManifestArgs) -> ExitCode {
 }
 
 fn run_verify(args: VerifyArgs) -> ExitCode {
+    Log::info(
+        "cli.verify",
+        &format!("started: {}", args.destination.display()),
+    );
     let report = match verify_manifest(&args.destination) {
         Ok(report) => report,
         Err(err) => {
+            Log::error("cli.verify", &format!("failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
+    Log::info(
+        "cli.verify",
+        &format!(
+            "finished: trusted={}, {} changed, {} deleted",
+            report.integrity.trusted,
+            report.changed.len(),
+            report.deleted.len()
+        ),
+    );
 
     if args.json {
         match serde_json::to_string_pretty(&report) {
@@ -671,19 +722,43 @@ fn print_verify_report(report: &VerifyReport) {
 }
 
 fn run_similar(args: SimilarArgs) -> ExitCode {
+    Log::info(
+        "cli.similar",
+        &format!("started: {} root(s)", args.roots.len()),
+    );
+    let extensions = if args.ext.is_empty() {
+        None
+    } else {
+        Some(
+            args.ext
+                .iter()
+                .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+                .collect(),
+        )
+    };
     let config = SimilarityConfig {
         duplicate_cutoff: args.duplicate_cutoff,
         high_coverage: args.high_coverage,
+        extensions,
         ..SimilarityConfig::default()
     };
 
     let report = match find_similar(&args.roots, &config) {
         Ok(report) => report,
         Err(err) => {
+            Log::error("cli.similar", &format!("failed: {err}"));
             eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
+    Log::info(
+        "cli.similar",
+        &format!(
+            "finished: {} pairs found, {} excluded as exact duplicates",
+            report.pairs.len(),
+            report.files_excluded_exact_duplicates
+        ),
+    );
 
     if args.json {
         match serde_json::to_string_pretty(&report) {
@@ -702,8 +777,11 @@ fn run_similar(args: SimilarArgs) -> ExitCode {
 
 fn print_similarity_report(report: &SimilarityReport) {
     println!(
-        "Considered {} file(s), skipped {} unsupported format(s)",
-        report.files_considered, report.files_skipped_unsupported
+        "Considered {} file(s), skipped {} unsupported format(s), excluded {} as confirmed exact duplicates, excluded {} by extension filter",
+        report.files_considered,
+        report.files_skipped_unsupported,
+        report.files_excluded_exact_duplicates,
+        report.files_excluded_by_extension_filter
     );
     println!(
         "Thresholds are uncalibrated defaults (SPEC.md section 4) - review before acting on them."
@@ -722,6 +800,9 @@ fn print_similarity_report(report: &SimilarityReport) {
             pair.a.display(),
             pair.coverage_b_to_a
         );
+        if let Some(media_match_score) = pair.media_match_score {
+            println!("  media match: {media_match_score:.2}");
+        }
     }
 }
 

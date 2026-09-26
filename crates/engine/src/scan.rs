@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::applog::Log;
 use crate::error::{EngineError, Result};
 
 /// One file found under a scanned root. Directories are not represented.
@@ -22,6 +23,7 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
         return Ok(Vec::new());
     }
 
+    Log::info("scan", &format!("walking started: {}", root.display()));
     let mut entries = Vec::new();
 
     for result in walkdir::WalkDir::new(root).follow_links(false) {
@@ -33,6 +35,10 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
             let source = err
                 .into_io_error()
                 .unwrap_or_else(|| io_other("directory walk failed"));
+            Log::error(
+                "scan",
+                &format!("walk failed under {}: {source}", path.display()),
+            );
             EngineError::Walk { path, source }
         })?;
 
@@ -48,6 +54,13 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
             let source = err
                 .into_io_error()
                 .unwrap_or_else(|| io_other("failed to stat entry"));
+            Log::error(
+                "scan",
+                &format!(
+                    "failed to read metadata for {}: {source}",
+                    dir_entry.path().display()
+                ),
+            );
             EngineError::Metadata {
                 path: dir_entry.path().to_path_buf(),
                 source,
@@ -55,12 +68,19 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
         })?;
 
         let size = metadata.len();
-        let modified = metadata
-            .modified()
-            .map_err(|source| EngineError::Metadata {
+        let modified = metadata.modified().map_err(|source| {
+            Log::error(
+                "scan",
+                &format!(
+                    "no modified time for {}: {source}",
+                    dir_entry.path().display()
+                ),
+            );
+            EngineError::Metadata {
                 path: dir_entry.path().to_path_buf(),
                 source,
-            })?;
+            }
+        })?;
 
         entries.push(ScanEntry {
             path: dir_entry.into_path(),
@@ -69,6 +89,14 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScanEntry>> {
         });
     }
 
+    Log::info(
+        "scan",
+        &format!(
+            "walking finished: {} - {} files found",
+            root.display(),
+            entries.len()
+        ),
+    );
     Ok(entries)
 }
 
@@ -89,7 +117,17 @@ fn io_other(message: &str) -> std::io::Error {
 /// (SPEC.md section 7's ignore list).
 fn is_ignored(file_name: &std::ffi::OsStr) -> bool {
     match file_name.to_str() {
-        Some(name) => name == ".DS_Store" || name == "Thumbs.db" || name.starts_with("._"),
+        Some(name) => {
+            name == ".DS_Store" || name == "Thumbs.db" || name.starts_with("._")
+            // Microsoft Office's own lock-file convention: opening
+            // "report.xlsx" creates a hidden "~$report.xlsx" alongside it,
+            // a tiny binary marker (who has it open), not a real document.
+            // It carries the same extension as the real file, so without
+            // this it reaches the zip-based docx/pptx/xlsx readers and
+            // fails ("Could not find EOCD") since it was never a zip
+            // archive to begin with - not corruption, just not a document.
+            || name.starts_with("~$")
+        }
         None => false,
     }
 }

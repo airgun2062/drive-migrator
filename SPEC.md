@@ -80,6 +80,7 @@ Also:
 - Compare mtimes with a tolerance window (start at 2 seconds), because FAT and exFAT store local time at coarse precision. Fall back to hashing when ambiguous.
 - Guard against a destination nested inside the source, or the reverse.
 - Progress has two phases: analysis (scan, hash, similarity) and transfer. ETA uses an exponentially weighted moving average of files per second for hashing and bytes per second for copying, tracked separately.
+- Fingerprint cache storage: SQLite (`rusqlite`, already a dependency for the journal and manifest - section 10), queried on demand per file (`SELECT ... WHERE path = ? AND size = ? AND modified = ?`) rather than loaded eagerly into memory as a whole. This keeps peak RAM independent of total cache size as it grows, at the cost of a per-lookup query instead of a single in-memory hashmap read - a worthwhile trade once the cache is large, since SQLite's own page cache manages what stays hot far better than materializing everything up front regardless of whether a given run needs it. The original implementation stores this as a single JSON file loaded whole into memory; migrating it to SQLite is planned, not yet done.
 
 ## 4. Detection pipeline
 
@@ -102,18 +103,24 @@ Case 2: content similarity: docx, xlsx, pptx, csv, tsv, txt, md, html, htm, xml,
 
 | Format | Extract | Compare with |
 |---|---|---|
-| docx, pptx, rtf, txt, md, html, htm | Plain text by section, markup stripped | Chunk embeddings |
+| docx, pptx, rtf, txt, md | Plain text by section, markup stripped | Chunk embeddings |
+| html, htm | Full raw text, markup NOT stripped | Chunk embeddings |
 | xlsx, csv, tsv | Cell values per row, plus formulas | Row-level hashing and Jaccard |
 | json, yaml, yml, xml | Parse and canonicalize (sorted keys, no whitespace) | Structural diff, then text |
 | source code | Normalized text, optionally comments stripped | Token shingles and MinHash |
 
 Embeddings are poor for numbers and code. Do not use them there.
 
+Html/htm are extracted as full raw text rather than DOM-visible text only: two files can be generated from the same template but wired to different data through attribute values alone (`<script src="PPINetwork.js">` vs `<script src="@NETWORK_NAME@.js">`), which DOM-text extraction would miss entirely and score as identical. Markup syntax is not special-cased; shingling already splits on every non-alphanumeric character, so tags/attributes tokenize as ordinary words.
+
+Docx, pptx, and xlsx also carry embedded media (images, and similar binary parts) that the text-only extraction above never sees, so two documents can score a perfect text match while actually differing in their pictures. For these three formats, embedded media entries are BLAKE3-hashed and compared as a set (not a multiset - a repeated image counts once) using the Sorensen-Dice coefficient, `2 * |A ∩ B| / (|A| + |B|)`. This produces a `media_match_score` (0 to 1, or absent when neither side has any media) reported alongside each pair. It is purely an additional, informational signal for a human choosing between versions - it does not feed into `coverage`/`jaccard_estimate` or the relationship classification in section 5, which stay text-only.
+
 ### Thresholds and grouping
 
 - Calibrate on labeled data: hand-label about 200 pairs from real data (kept outside the repo), choose tau and the duplicate cutoff from the precision-recall curve, and store them with the model version in the job config. Cosine values are not comparable across models or domains.
 - Report a confidence level with each group.
 - Avoid transitive merging (A~B and B~C but A not~C). Use average-linkage clustering or verify pairwise.
+- Cache extracted tokens/shingles and MinHash signatures per file, same SQLite-backed, on-demand-query storage as the fingerprint cache (section 3), keyed the same way (path, size, mtime). Extraction (reading and parsing every docx/pptx/xlsx/csv/etc.) is the expensive step; the duplicate cutoff and coverage threshold only affect the final, cheap classification pass over already-computed signatures. Caching the signatures means re-running with a different threshold - the normal way these get tuned in practice, since the defaults are uncalibrated (above) - costs a re-classification pass, not a full re-extraction of every file. Planned, not yet implemented.
 
 ## 5. Coverage and version families
 

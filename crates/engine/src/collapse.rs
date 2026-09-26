@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::analyze;
+use crate::applog::Log;
 use crate::cache::FingerprintCache;
 use crate::error::Result;
 use crate::reconcile::{ReconcilePlan, ReconcileState};
@@ -108,8 +109,25 @@ pub fn plan_collapse(
     cache: &mut FingerprintCache,
     config: &CollapseConfig,
 ) -> Result<CollapseReport> {
+    Log::info(
+        "collapse",
+        &format!(
+            "plan_collapse started: {} roots, keep_newest={}, archive={}",
+            roots.len(),
+            config.keep_newest,
+            config.archive
+        ),
+    );
     let analyze_report = analyze::analyze(roots, cache)?;
-    let similarity_report = similarity::find_similar(roots, &config.similarity)?;
+    // Reuses the exact-duplicate groups just computed above instead of
+    // calling plain `find_similar` (which would redundantly re-run its own
+    // T1 pass with a fresh, unpersisted cache) - see
+    // `similarity::find_similar_excluding_exact_duplicates`.
+    let similarity_report = similarity::find_similar_excluding_exact_duplicates(
+        roots,
+        &config.similarity,
+        &analyze_report.duplicate_groups,
+    )?;
     let version_report = versions::build_version_report(&similarity_report.pairs);
 
     let mut decisions: Vec<CollapseDecision> = Vec::new();
@@ -196,6 +214,13 @@ pub fn plan_collapse(
         .filter(|d| d.action != CollapseAction::Keep)
         .map(|d| d.size)
         .sum();
+
+    Log::info(
+        "collapse",
+        &format!(
+            "plan_collapse finished: {files_kept} kept, {files_collapsed} collapsed, {bytes_saved} bytes saved"
+        ),
+    );
 
     Ok(CollapseReport {
         decisions,

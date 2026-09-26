@@ -216,7 +216,7 @@ fn cache_reuse_does_not_change_the_classification() {
     tree.write("dest/a.txt", b"identical content here");
     let cache_path = tree.path().join("cache.json");
 
-    let mut cache = FingerprintCache::load(&cache_path).unwrap();
+    let mut cache = FingerprintCache::load(&cache_path);
     let first = plan(
         &tree.path().join("source"),
         &tree.path().join("dest"),
@@ -226,7 +226,7 @@ fn cache_reuse_does_not_change_the_classification() {
     .unwrap();
     cache.save(&cache_path).unwrap();
 
-    let mut cache2 = FingerprintCache::load(&cache_path).unwrap();
+    let mut cache2 = FingerprintCache::load(&cache_path);
     let second = plan(
         &tree.path().join("source"),
         &tree.path().join("dest"),

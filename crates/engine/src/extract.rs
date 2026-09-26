@@ -18,7 +18,8 @@ pub enum DocumentKind {
     PlainText,
     Html,
     Json,
-    DelimitedRows,
+    Csv,
+    Tsv,
     SourceCode,
     Docx,
     Pptx,
@@ -41,7 +42,8 @@ pub fn classify(path: &Path) -> Option<DocumentKind> {
         "txt" | "md" => Some(DocumentKind::PlainText),
         "html" | "htm" => Some(DocumentKind::Html),
         "json" => Some(DocumentKind::Json),
-        "csv" | "tsv" => Some(DocumentKind::DelimitedRows),
+        "csv" => Some(DocumentKind::Csv),
+        "tsv" => Some(DocumentKind::Tsv),
         "docx" => Some(DocumentKind::Docx),
         "pptx" => Some(DocumentKind::Pptx),
         "xlsx" => Some(DocumentKind::Xlsx),
@@ -61,22 +63,132 @@ pub fn classify(path: &Path) -> Option<DocumentKind> {
 pub struct ExtractedDocument {
     pub kind: DocumentKind,
     pub tokens: HashSet<u64>,
+    /// Embedded media (images, etc.) hashed independently of the text
+    /// tokens above, so two documents that score a perfect text match can
+    /// still be told apart by what they actually embed. Always empty for
+    /// non-container formats; may also be empty for docx/pptx/xlsx with no
+    /// embedded media.
+    pub media_hashes: Vec<blake3::Hash>,
 }
 
+/// Routes to exactly one handler per `DocumentKind` - Rust's idiomatic
+/// answer to "pick the right handler for this file's type": an exhaustive
+/// match over a closed enum, checked at compile time, rather than a
+/// trait-object factory (there's no dynamic dispatch here, and none is
+/// needed - every kind is known up front).
 pub fn extract(path: &Path, kind: DocumentKind) -> Result<ExtractedDocument> {
-    let tokens = match kind {
-        DocumentKind::PlainText | DocumentKind::SourceCode => shingle_tokens(&read_text(path)?),
-        DocumentKind::Html => shingle_tokens(&extract_html_text(path)?),
-        DocumentKind::Json => shingle_tokens(&canonical_json_text(path)?),
-        DocumentKind::DelimitedRows => row_tokens(path)?,
-        DocumentKind::Docx => shingle_tokens(&extract_docx_text(path)?),
-        DocumentKind::Pptx => shingle_tokens(&extract_pptx_text(path)?),
-        DocumentKind::Xlsx => xlsx_row_tokens(path)?,
-        DocumentKind::Xml => shingle_tokens(&extract_all_xml_text(&read_text(path)?)),
-        DocumentKind::Yaml => shingle_tokens(&canonical_yaml_text(path)?),
-        DocumentKind::Rtf => shingle_tokens(&strip_rtf(&read_text(path)?)),
+    let (tokens, media_hashes) = match kind {
+        DocumentKind::PlainText | DocumentKind::SourceCode => {
+            (similarity_default(path)?, Vec::new())
+        }
+        DocumentKind::Html => (similarity_html(path)?, Vec::new()),
+        DocumentKind::Json => (similarity_json(path)?, Vec::new()),
+        DocumentKind::Csv => (similarity_csv(path)?, Vec::new()),
+        DocumentKind::Tsv => (similarity_tsv(path)?, Vec::new()),
+        DocumentKind::Docx => (
+            similarity_docx(path)?,
+            collect_media_hashes(path, "word/media/")?,
+        ),
+        DocumentKind::Pptx => (
+            similarity_pptx(path)?,
+            collect_media_hashes(path, "ppt/media/")?,
+        ),
+        DocumentKind::Xlsx => (
+            similarity_xlsx(path)?,
+            collect_media_hashes(path, "xl/media/")?,
+        ),
+        DocumentKind::Xml => (similarity_xml(path)?, Vec::new()),
+        DocumentKind::Yaml => (similarity_yaml(path)?, Vec::new()),
+        DocumentKind::Rtf => (similarity_rtf(path)?, Vec::new()),
     };
-    Ok(ExtractedDocument { kind, tokens })
+    Ok(ExtractedDocument {
+        kind,
+        tokens,
+        media_hashes,
+    })
+}
+
+/// Shared fallback: plain-text shingling. Used directly for `PlainText`/
+/// `SourceCode`, and as the fallback for any structured format whose
+/// specific parse fails below - see `similarity_csv`/`similarity_tsv`/
+/// `similarity_json`/`similarity_yaml`.
+fn similarity_default(path: &Path) -> Result<HashSet<u64>> {
+    Ok(shingle_tokens(&read_text(path)?))
+}
+
+/// Reads the file's full raw content as text - not just the DOM's visible
+/// text nodes - so a difference that lives entirely in an attribute value
+/// (`<script src="PPINetwork.js">` vs `<script src="@NETWORK_NAME@.js">`,
+/// for instance - files generated from the same template but wired to
+/// different data) is still comparable. Tag/attribute syntax (`<`, `>`,
+/// `=`, `"`, `/`) is not special-cased; `shingle_tokens` already splits on
+/// every non-alphanumeric character, so `<div class="foo">` naturally
+/// tokenizes as "div", "class", "foo" as their own words rather than being
+/// stripped away as markup.
+fn similarity_html(path: &Path) -> Result<HashSet<u64>> {
+    similarity_default(path)
+}
+
+/// Tries the strict, canonicalized JSON parse first; a file whose format is
+/// text-readable but structurally corrupted (malformed syntax) falls back
+/// to plain-text treatment rather than being excluded from comparison
+/// entirely - it still has real, comparable word content.
+fn similarity_json(path: &Path) -> Result<HashSet<u64>> {
+    match canonical_json_text(path) {
+        Ok(text) => Ok(shingle_tokens(&text)),
+        Err(_) => similarity_default(path),
+    }
+}
+
+/// Same fallback rule as `similarity_json`: a `.yaml`/`.yml` file that
+/// fails to parse still gets compared as plain text.
+fn similarity_yaml(path: &Path) -> Result<HashSet<u64>> {
+    match canonical_yaml_text(path) {
+        Ok(text) => Ok(shingle_tokens(&text)),
+        Err(_) => similarity_default(path),
+    }
+}
+
+/// Same fallback rule again: a `.csv` with bad delimiters, non-UTF-8 bytes,
+/// or a mislabeled extension (e.g. actually tab-separated, or not really
+/// delimited data at all) still gets compared as plain text rather than
+/// excluded.
+fn similarity_csv(path: &Path) -> Result<HashSet<u64>> {
+    match delimited_rows_tokens(path, b',') {
+        Ok(tokens) => Ok(tokens),
+        Err(_) => similarity_default(path),
+    }
+}
+
+fn similarity_tsv(path: &Path) -> Result<HashSet<u64>> {
+    match delimited_rows_tokens(path, b'\t') {
+        Ok(tokens) => Ok(tokens),
+        Err(_) => similarity_default(path),
+    }
+}
+
+fn similarity_docx(path: &Path) -> Result<HashSet<u64>> {
+    Ok(shingle_tokens(&extract_docx_text(path)?))
+}
+
+fn similarity_pptx(path: &Path) -> Result<HashSet<u64>> {
+    Ok(shingle_tokens(&extract_pptx_text(path)?))
+}
+
+/// No text-fallback here, unlike csv/tsv/json/yaml above: docx/pptx/xlsx
+/// are zip-based binary containers, so a corrupted one has no text-readable
+/// bytes to fall back to - it stays excluded from comparison on failure,
+/// same as before.
+fn similarity_xlsx(path: &Path) -> Result<HashSet<u64>> {
+    xlsx_row_tokens(path)
+}
+
+fn similarity_xml(path: &Path) -> Result<HashSet<u64>> {
+    Ok(shingle_tokens(&extract_all_xml_text(&read_text(path)?)))
+}
+
+fn similarity_rtf(path: &Path) -> Result<HashSet<u64>> {
+    Ok(shingle_tokens(&strip_rtf(&read_text(path)?)))
 }
 
 fn read_text(path: &Path) -> Result<String> {
@@ -85,12 +197,6 @@ fn read_text(path: &Path) -> Result<String> {
         source,
     })?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn extract_html_text(path: &Path) -> Result<String> {
-    let html = read_text(path)?;
-    let document = scraper::Html::parse_document(&html);
-    Ok(document.root_element().text().collect::<Vec<_>>().join(" "))
 }
 
 fn canonical_json_text(path: &Path) -> Result<String> {
@@ -110,16 +216,15 @@ fn canonical_json_text(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&canonical).into_owned())
 }
 
-fn row_tokens(path: &Path) -> Result<HashSet<u64>> {
+/// Parses `path` as delimited rows using `delimiter`, one hash per row
+/// (cells joined with a unit-separator character before hashing). Shared by
+/// `similarity_csv`/`similarity_tsv`, which each just pick the delimiter
+/// for their own format.
+fn delimited_rows_tokens(path: &Path, delimiter: u8) -> Result<HashSet<u64>> {
     let bytes = std::fs::read(path).map_err(|source| EngineError::Read {
         path: path.to_path_buf(),
         source,
     })?;
-    let delimiter = if path.extension().and_then(|e| e.to_str()) == Some("tsv") {
-        b'\t'
-    } else {
-        b','
-    };
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(false)
@@ -163,6 +268,41 @@ fn read_zip_entry_text(path: &Path, entry_name: &str) -> Result<String> {
             source,
         })?;
     Ok(text)
+}
+
+/// BLAKE3-hashes every zip entry under `media_prefix` (e.g. `word/media/`,
+/// `ppt/media/`, `xl/media/`) - a separate archive-read pass rather than
+/// piggybacking on `read_zip_entry_text`/`extract_pptx_text`'s own open,
+/// since xlsx has no equivalent shared open to begin with (`xlsx_row_tokens`
+/// goes through `calamine`, which doesn't expose the raw zip). A single
+/// unreadable entry is skipped rather than failing the whole document - only
+/// a completely unopenable archive is an error here, same as the text
+/// extractors above.
+fn collect_media_hashes(path: &Path, media_prefix: &str) -> Result<Vec<blake3::Hash>> {
+    let file = std::fs::File::open(path).map_err(|source| EngineError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|source| EngineError::ZipOpen {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut hashes = Vec::new();
+    for i in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(i) else {
+            continue;
+        };
+        if !entry.name().starts_with(media_prefix) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        hashes.push(blake3::hash(&bytes));
+    }
+    Ok(hashes)
 }
 
 fn extract_docx_text(path: &Path) -> Result<String> {

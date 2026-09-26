@@ -13,6 +13,7 @@ fn pair(a: &str, b: &str, relationship: Relationship) -> SimilarPair {
         coverage_a_to_b: 0.9,
         coverage_b_to_a: 0.9,
         relationship,
+        media_match_score: None,
     }
 }
 

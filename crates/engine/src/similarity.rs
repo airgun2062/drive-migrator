@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::analyze::{self, DuplicateGroup};
+use crate::applog::Log;
+use crate::cache::FingerprintCache;
 use crate::error::Result;
 use crate::extract::{self, ExtractedDocument};
 use crate::scan;
@@ -23,6 +26,11 @@ pub struct SimilarityConfig {
     /// a pair's relationship (SPEC.md section 5).
     pub high_coverage: f64,
     pub seed: u64,
+    /// When set, only files whose lowercase extension (no leading dot) is in
+    /// this set are considered at all - every other file is excluded before
+    /// classification/extraction, the same as an unsupported format. `None`
+    /// (the default) considers every extension `extract::classify` supports.
+    pub extensions: Option<HashSet<String>>,
 }
 
 impl Default for SimilarityConfig {
@@ -36,6 +44,7 @@ impl Default for SimilarityConfig {
             duplicate_cutoff: 0.5,
             high_coverage: 0.8,
             seed: 0x5EED,
+            extensions: None,
         }
     }
 }
@@ -63,12 +72,29 @@ pub struct SimilarPair {
     pub coverage_a_to_b: f64,
     pub coverage_b_to_a: f64,
     pub relationship: Relationship,
+    /// Set-based (Sorensen-Dice) overlap of embedded media between `a` and
+    /// `b` - `None` when neither has any (including every format without
+    /// the concept of embedded media). Purely informational: `relationship`
+    /// above is still classified from text alone (SPEC.md section 5); this
+    /// is surfaced alongside it so a human choosing between near-duplicate
+    /// versions can also see how their embedded media compares.
+    pub media_match_score: Option<f64>,
 }
 
 #[derive(Debug, Default, Serialize)]
 pub struct SimilarityReport {
     pub files_considered: usize,
     pub files_skipped_unsupported: usize,
+    /// Files that were part of a confirmed T1 exact-duplicate group (SPEC.md
+    /// section 4: "each tier sees only what survives the previous one") and
+    /// so were excluded here rather than re-discovered as a misleading
+    /// "near duplicate" with a perfect 1.0 score - one representative per
+    /// group still goes through comparison normally.
+    pub files_excluded_exact_duplicates: usize,
+    /// Files excluded because `SimilarityConfig::extensions` was set and
+    /// this file's extension wasn't in it. Zero whenever no filter is
+    /// configured.
+    pub files_excluded_by_extension_filter: usize,
     pub pairs: Vec<SimilarPair>,
 }
 
@@ -77,17 +103,93 @@ pub struct SimilarityReport {
 /// generation (SPEC.md section 4, T3) so it never compares every pair, then
 /// verifies each candidate pairwise (never assumes a whole LSH group is
 /// mutually similar, since that could transitively merge unrelated files).
+///
+/// Runs its own T1 exact-duplicate pass first, with a fresh, unpersisted
+/// cache, so files already confirmed byte-identical to each other never
+/// reach T3 except as one representative (see
+/// `find_similar_excluding_exact_duplicates`). Callers that already have an
+/// `AnalyzeReport` from calling `analyze` themselves (`collapse::
+/// plan_collapse`, for instance) should call
+/// `find_similar_excluding_exact_duplicates` directly instead, to reuse
+/// that result and their own persisted cache rather than paying for a
+/// second, redundant exact-hash pass here.
 pub fn find_similar(roots: &[PathBuf], config: &SimilarityConfig) -> Result<SimilarityReport> {
+    let mut cache = FingerprintCache::default();
+    let analyze_report = analyze::analyze(roots, &mut cache)?;
+    find_similar_excluding_exact_duplicates(roots, config, &analyze_report.duplicate_groups)
+}
+
+/// Same as `find_similar`, but takes already-known exact-duplicate groups
+/// (from `analyze`) instead of computing them again, and excludes every
+/// member of each group except one representative (first by path, for
+/// determinism - the same tie-break `collapse` uses) from ever being
+/// extracted or compared. A group's relationship to *other*, genuinely
+/// different documents is still discovered normally through that one
+/// representative; what's eliminated is the redundant, misleading
+/// "near-duplicate, 1.0/1.0/1.0" result T3 would otherwise report for two
+/// files that T1 already proved are the same file.
+pub fn find_similar_excluding_exact_duplicates(
+    roots: &[PathBuf],
+    config: &SimilarityConfig,
+    duplicate_groups: &[DuplicateGroup],
+) -> Result<SimilarityReport> {
     let entries = scan::scan_roots(roots)?;
+
+    let excluded = exact_duplicate_exclusions(duplicate_groups);
+
+    let extractable_total = entries
+        .iter()
+        .filter(|e| {
+            !excluded.contains(&e.path)
+                && matches_extension_filter(&e.path, &config.extensions)
+                && extract::classify(&e.path).is_some()
+        })
+        .count();
+    Log::info(
+        "similarity",
+        &format!(
+            "comparing started: {extractable_total} extractable files ({} excluded as confirmed exact duplicates)",
+            excluded.len()
+        ),
+    );
 
     let mut paths = Vec::new();
     let mut documents: Vec<ExtractedDocument> = Vec::new();
     let mut skipped = 0usize;
+    let mut excluded_exact_duplicates = 0usize;
+    let mut excluded_by_extension_filter = 0usize;
 
     for entry in &entries {
+        if !matches_extension_filter(&entry.path, &config.extensions) {
+            excluded_by_extension_filter += 1;
+            continue;
+        }
+        if excluded.contains(&entry.path) {
+            excluded_exact_duplicates += 1;
+            continue;
+        }
         match extract::classify(&entry.path) {
             Some(kind) => {
-                let document = extract::extract(&entry.path, kind)?;
+                // A single unreadable or genuinely corrupted file (a
+                // truncated zip that never was a valid docx/pptx/xlsx, for
+                // instance) must never abort the whole comparison - one
+                // file that can't be extracted is excluded from
+                // comparison, the same as an unsupported format, not a
+                // reason to stop looking at everything else.
+                let document = match extract::extract(&entry.path, kind) {
+                    Ok(document) => document,
+                    Err(err) => {
+                        Log::error(
+                            "similarity",
+                            &format!(
+                                "extraction failed for {} - excluded from comparison: {err}",
+                                entry.path.display()
+                            ),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
+                };
                 if document.tokens.is_empty() {
                     skipped += 1;
                     continue;
@@ -122,6 +224,10 @@ pub fn find_similar(roots: &[PathBuf], config: &SimilarityConfig) -> Result<Simi
                 let coverage_b_to_a = coverage(&documents[b_idx].tokens, &documents[a_idx].tokens);
                 let relationship =
                     classify_relationship(coverage_a_to_b, coverage_b_to_a, config.high_coverage);
+                let media_match_score = media_match_score(
+                    &documents[a_idx].media_hashes,
+                    &documents[b_idx].media_hashes,
+                );
                 pairs.push(SimilarPair {
                     a: paths[a_idx].clone(),
                     b: paths[b_idx].clone(),
@@ -129,6 +235,7 @@ pub fn find_similar(roots: &[PathBuf], config: &SimilarityConfig) -> Result<Simi
                     coverage_a_to_b,
                     coverage_b_to_a,
                     relationship,
+                    media_match_score,
                 });
             }
         }
@@ -139,11 +246,47 @@ pub fn find_similar(roots: &[PathBuf], config: &SimilarityConfig) -> Result<Simi
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    Log::info(
+        "similarity",
+        &format!(
+            "comparing finished: {} files considered, {skipped} skipped, {excluded_exact_duplicates} excluded as exact duplicates, {excluded_by_extension_filter} excluded by extension filter, {} pairs found",
+            documents.len(),
+            pairs.len()
+        ),
+    );
+
     Ok(SimilarityReport {
         files_considered: documents.len(),
         files_skipped_unsupported: skipped,
+        files_excluded_exact_duplicates: excluded_exact_duplicates,
+        files_excluded_by_extension_filter: excluded_by_extension_filter,
         pairs,
     })
+}
+
+/// Whether `path`'s lowercase extension is allowed by `extensions` - always
+/// true when no filter is configured (`None`).
+fn matches_extension_filter(path: &std::path::Path, extensions: &Option<HashSet<String>>) -> bool {
+    let Some(allowed) = extensions else {
+        return true;
+    };
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| allowed.contains(&e.to_ascii_lowercase()))
+        .unwrap_or(false)
+}
+
+/// Every path that should be excluded from T3 because it's a redundant
+/// member of a confirmed T1 exact-duplicate group - every path in every
+/// group except one representative (first by path, for determinism).
+fn exact_duplicate_exclusions(duplicate_groups: &[DuplicateGroup]) -> HashSet<PathBuf> {
+    let mut excluded = HashSet::new();
+    for group in duplicate_groups {
+        let mut files = group.files.clone();
+        files.sort();
+        excluded.extend(files.into_iter().skip(1));
+    }
+    excluded
 }
 
 fn classify_relationship(coverage_a_to_b: f64, coverage_b_to_a: f64, high: f64) -> Relationship {
@@ -165,6 +308,21 @@ pub fn coverage(a_tokens: &HashSet<u64>, b_tokens: &HashSet<u64>) -> f64 {
     }
     let intersection = a_tokens.intersection(b_tokens).count();
     intersection as f64 / a_tokens.len() as f64
+}
+
+/// Sorensen-Dice overlap of two documents' embedded media: `2 * |A ∩ B| /
+/// (|A| + |B|)`, treating each document's media as a set - a document
+/// embedding the same image twice counts it once, same as `coverage` does
+/// for text tokens. `None` when both sides are empty, since "no media in
+/// either document" isn't a meaningful comparison point.
+pub fn media_match_score(a: &[blake3::Hash], b: &[blake3::Hash]) -> Option<f64> {
+    if a.is_empty() && b.is_empty() {
+        return None;
+    }
+    let a_set: HashSet<&blake3::Hash> = a.iter().collect();
+    let b_set: HashSet<&blake3::Hash> = b.iter().collect();
+    let matches = a_set.intersection(&b_set).count();
+    Some(2.0 * matches as f64 / (a_set.len() + b_set.len()) as f64)
 }
 
 #[derive(Debug, Clone)]

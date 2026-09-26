@@ -13,3 +13,14 @@
 
 # Local scratch notes for resuming a paused session; never meant to be committed.
 /SESSION_STATE.md
+
+# Log.info/Log.error output (crates/engine/src/applog.rs): hourly-rotating
+# runtime diagnostics, not source - never meant to be committed.
+/logs
+
+# Ad-hoc CLI output from manually running `analyze`/`similar` against real
+# personal data (CLAUDE.md hard rule: never commit real user data). Not
+# source, not a reproducible fixture - regenerate against /data if needed.
+/scan-cache.json
+/similar-report.json
+/similar-stderr.txt

@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::applog::Log;
 use crate::error::{EngineError, Result};
 use crate::reconcile::{PartialReason, ReconcilePlan, ReconcileState};
 use crate::transfer::{TransferOutcome, TransferResult};
@@ -53,6 +54,13 @@ impl Journal {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|source| {
+                    Log::error(
+                        "journal",
+                        &format!(
+                            "failed to create journal directory {}: {source}",
+                            path.display()
+                        ),
+                    );
                     EngineError::JournalDirCreate {
                         path: path.to_path_buf(),
                         source,
@@ -60,20 +68,38 @@ impl Journal {
                 })?;
             }
         }
-        let conn = Connection::open(path).map_err(|source| EngineError::JournalOpen {
-            path: path.to_path_buf(),
-            source,
+        let conn = Connection::open(path).map_err(|source| {
+            Log::error(
+                "journal",
+                &format!("failed to open journal {}: {source}", path.display()),
+            );
+            EngineError::JournalOpen {
+                path: path.to_path_buf(),
+                source,
+            }
         })?;
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|source| EngineError::JournalOpen {
+            .map_err(|source| {
+                Log::error(
+                    "journal",
+                    &format!("failed to set WAL mode for {}: {source}", path.display()),
+                );
+                EngineError::JournalOpen {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+        conn.execute_batch(SCHEMA).map_err(|source| {
+            Log::error(
+                "journal",
+                &format!("failed to apply schema to {}: {source}", path.display()),
+            );
+            EngineError::JournalOpen {
                 path: path.to_path_buf(),
                 source,
-            })?;
-        conn.execute_batch(SCHEMA)
-            .map_err(|source| EngineError::JournalOpen {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            }
+        })?;
+        Log::info("journal", &format!("opened: {}", path.display()));
         Ok(Self { conn })
     }
 
