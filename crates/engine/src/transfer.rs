@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::applog::Log;
 use crate::error::{EngineError, Result};
 use crate::hash;
 use crate::reconcile::{PlanEntry, ReconcilePlan, ReconcileState};
@@ -60,6 +61,14 @@ pub struct TransferSummary {
 /// `Verified`, `Conflict`, `Blocked`, and `DestinationOnly` entries are never
 /// touched. A single file's failure does not stop the rest of the run.
 pub fn run(plan: &ReconcilePlan, options: &RunOptions) -> Result<TransferSummary> {
+    Log::info(
+        "transfer",
+        &format!(
+            "transfer started: {} -> {}",
+            plan.source_root.display(),
+            plan.destination_root.display()
+        ),
+    );
     discard_stale_part_files(&plan.destination_root)?;
 
     let mut summary = TransferSummary::default();
@@ -79,6 +88,14 @@ pub fn run(plan: &ReconcilePlan, options: &RunOptions) -> Result<TransferSummary
             }
         }
     }
+
+    Log::info(
+        "transfer",
+        &format!(
+            "transfer finished: {} copied, {} failed, {} bytes copied",
+            summary.copied, summary.failed, summary.bytes_copied
+        ),
+    );
 
     Ok(summary)
 }
@@ -101,6 +118,10 @@ fn copy_entry(entry: &PlanEntry, destination_root: &Path, summary: &mut Transfer
             }
         }
         Err(err) => {
+            Log::error(
+                "transfer",
+                &format!("failed to copy {}: {err}", entry.relative_path.display()),
+            );
             summary.failed += 1;
             TransferResult {
                 relative_path: entry.relative_path.clone(),

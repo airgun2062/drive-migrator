@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::applog::Log;
 use crate::cache::FingerprintCache;
 use crate::error::Result;
 use crate::hash;
@@ -40,14 +41,28 @@ pub fn analyze(roots: &[PathBuf], cache: &mut FingerprintCache) -> Result<Analyz
     }
     // Files with a unique size cannot be duplicates of anything else scanned.
     let size_groups: Vec<Vec<ScanEntry>> = by_size.into_values().filter(|g| g.len() > 1).collect();
+    Log::info(
+        "analyze",
+        &format!(
+            "hashing started: {files_scanned} files scanned, {} candidate groups",
+            size_groups.len()
+        ),
+    );
 
-    let hashed_groups: Vec<Vec<(ScanEntry, blake3::Hash, bool)>> = size_groups
+    let hashed_groups: Vec<GroupHashResult> = size_groups
         .into_par_iter()
         .map(|group| hash_size_group(&group, cache))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()
+        .map_err(|err| {
+            Log::error("analyze", &format!("hashing failed: {err}"));
+            err
+        })?;
 
     for group in &hashed_groups {
-        for (entry, hash, is_new) in group {
+        for (entry, hash) in &group.fresh_samples {
+            cache.record_sample(entry, *hash);
+        }
+        for (entry, hash, is_new) in &group.confirmed {
             if *is_new {
                 cache.record(entry, *hash);
             }
@@ -56,7 +71,7 @@ pub fn analyze(roots: &[PathBuf], cache: &mut FingerprintCache) -> Result<Analyz
 
     let mut by_hash: HashMap<String, (u64, Vec<PathBuf>)> = HashMap::new();
     for group in &hashed_groups {
-        for (entry, hash, _) in group {
+        for (entry, hash, _) in &group.confirmed {
             let key = hash.to_hex().to_string();
             let bucket = by_hash
                 .entry(key)
@@ -81,6 +96,14 @@ pub fn analyze(roots: &[PathBuf], cache: &mut FingerprintCache) -> Result<Analyz
         .map(|g| g.size * (g.files.len() as u64 - 1))
         .sum();
 
+    Log::info(
+        "analyze",
+        &format!(
+            "hashing finished: {} duplicate groups, {duplicate_files} duplicate files, {reclaimable_bytes} reclaimable bytes",
+            duplicate_groups.len()
+        ),
+    );
+
     Ok(AnalyzeReport {
         roots: roots.to_vec(),
         files_scanned,
@@ -91,26 +114,50 @@ pub fn analyze(roots: &[PathBuf], cache: &mut FingerprintCache) -> Result<Analyz
     })
 }
 
+/// One same-size group's hashing results: `confirmed` (used for duplicate
+/// grouping - unchanged semantics from before sample-hash caching existed)
+/// plus `fresh_samples` (every sample hash computed this run that wasn't
+/// already cached, recorded afterward so a rescan of an unchanged file can
+/// skip re-sampling it even if it's never proven to be a duplicate).
+struct GroupHashResult {
+    confirmed: Vec<(ScanEntry, blake3::Hash, bool)>,
+    fresh_samples: Vec<(ScanEntry, blake3::Hash)>,
+}
+
 /// Resolves the confirmed hash for every entry in a same-size group, using
 /// the cache where possible and otherwise the sample-then-full BLAKE3
-/// pipeline. Returns `(entry, hash, is_newly_computed)` for members that
-/// survive the sample-hash pre-filter; entries proven unique by sampling
-/// alone are dropped, since they cannot be duplicates.
-fn hash_size_group(
-    group: &[ScanEntry],
-    cache: &FingerprintCache,
-) -> Result<Vec<(ScanEntry, blake3::Hash, bool)>> {
+/// pipeline. `confirmed` holds `(entry, hash, is_newly_computed)` for
+/// members that survive the sample-hash pre-filter; entries proven unique
+/// by sampling alone are dropped from it, since they cannot be duplicates -
+/// but their sample hash is still returned via `fresh_samples` so it isn't
+/// lost to the cache just because it didn't end up mattering for grouping.
+fn hash_size_group(group: &[ScanEntry], cache: &FingerprintCache) -> Result<GroupHashResult> {
     enum Resolved {
-        Cached(ScanEntry, blake3::Hash),
+        // A previously-confirmed full hash is cached and still valid - no
+        // hashing of any kind needed for this file.
+        CachedFull(ScanEntry, blake3::Hash),
+        // Have a sample hash (freshly computed, or reused from the cache
+        // because this file was already sampled - possibly in an earlier
+        // run - and hasn't changed since), not yet confirmed via full hash.
         Sampled(ScanEntry, blake3::Hash),
     }
 
     let mut pending = Vec::with_capacity(group.len());
+    let mut fresh_samples = Vec::new();
     for entry in group {
         if let Some(cached_hash) = cache.lookup(entry) {
-            pending.push(Resolved::Cached(entry.clone(), cached_hash));
+            pending.push(Resolved::CachedFull(entry.clone(), cached_hash));
+        } else if let Some(cached_sample) = cache.lookup_sample(entry) {
+            pending.push(Resolved::Sampled(entry.clone(), cached_sample));
         } else {
-            let sample = hash::sample_hash(&entry.path, entry.size)?;
+            let sample = hash::sample_hash(&entry.path, entry.size).map_err(|err| {
+                Log::error(
+                    "hash",
+                    &format!("sample-hash failed for {}: {err}", entry.path.display()),
+                );
+                err
+            })?;
+            fresh_samples.push((entry.clone(), sample));
             pending.push(Resolved::Sampled(entry.clone(), sample));
         }
     }
@@ -122,20 +169,29 @@ fn hash_size_group(
         }
     }
 
-    let mut out = Vec::with_capacity(group.len());
+    let mut confirmed = Vec::with_capacity(group.len());
     for item in pending {
         match item {
-            Resolved::Cached(entry, hash) => out.push((entry, hash, false)),
+            Resolved::CachedFull(entry, hash) => confirmed.push((entry, hash, false)),
             Resolved::Sampled(entry, sample) => {
                 if sample_counts[&sample] < 2 {
                     // No other file in this size group shares its sample
                     // hash, so it cannot be a duplicate; skip the full hash.
                     continue;
                 }
-                let full = hash::full_hash(&entry.path)?;
-                out.push((entry, full, true));
+                let full = hash::full_hash(&entry.path).map_err(|err| {
+                    Log::error(
+                        "hash",
+                        &format!("full-hash failed for {}: {err}", entry.path.display()),
+                    );
+                    err
+                })?;
+                confirmed.push((entry, full, true));
             }
         }
     }
-    Ok(out)
+    Ok(GroupHashResult {
+        confirmed,
+        fresh_samples,
+    })
 }

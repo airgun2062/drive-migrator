@@ -57,11 +57,11 @@ fn cache_is_reused_on_second_analyze_and_hash_is_unchanged() {
     tree.write("b.txt", b"duplicate content here");
 
     let cache_path = tree.path().join("cache.json");
-    let mut cache = FingerprintCache::load(&cache_path).unwrap();
+    let mut cache = FingerprintCache::load(&cache_path);
     let first = analyze(&[tree.path().to_path_buf()], &mut cache).unwrap();
     cache.save(&cache_path).unwrap();
 
-    let mut cache2 = FingerprintCache::load(&cache_path).unwrap();
+    let mut cache2 = FingerprintCache::load(&cache_path);
     let second = analyze(&[tree.path().to_path_buf()], &mut cache2).unwrap();
 
     assert_eq!(first.duplicate_groups.len(), 1);

@@ -1,4 +1,5 @@
 pub mod analyze;
+pub mod applog;
 pub mod cache;
 pub mod collapse;
 pub mod error;
@@ -16,6 +17,7 @@ mod union_find;
 pub mod versions;
 
 pub use analyze::{analyze, AnalyzeReport, DuplicateGroup};
+pub use applog::Log;
 pub use cache::FingerprintCache;
 pub use collapse::{
     apply_collapse_to_plan, plan_collapse, CollapseAction, CollapseConfig, CollapseDecision,

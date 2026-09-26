@@ -46,6 +46,11 @@ fn ignores_known_junk_files() {
     tree.write(".DS_Store", b"mac junk");
     tree.write("Thumbs.db", b"windows junk");
     tree.write("._resource_fork", b"apple double junk");
+    // Microsoft Office's lock-file convention: a hidden marker created
+    // while "report.xlsx" is open, not a real document despite sharing its
+    // extension - trying to read it as a zip archive fails with a
+    // misleading "corrupted" error otherwise.
+    tree.write("~$report.xlsx", b"office lock file, not a real workbook");
 
     let entries = scan_root(tree.path()).expect("scan should succeed");
 

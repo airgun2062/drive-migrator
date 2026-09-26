@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::applog::Log;
 use crate::cache::FingerprintCache;
 use crate::error::{EngineError, Result};
 use crate::hash;
@@ -73,7 +74,24 @@ pub fn plan(
     cache: &mut FingerprintCache,
     rules: &PreflightRules,
 ) -> Result<ReconcilePlan> {
+    Log::info(
+        "reconcile",
+        &format!(
+            "plan started: {} vs {}",
+            source_root.display(),
+            destination_root.display()
+        ),
+    );
+
     if roots_are_nested(source_root, destination_root) {
+        Log::error(
+            "reconcile",
+            &format!(
+                "nested roots rejected: {} / {}",
+                source_root.display(),
+                destination_root.display()
+            ),
+        );
         return Err(EngineError::NestedRoots {
             source_root: source_root.to_path_buf(),
             destination_root: destination_root.to_path_buf(),
@@ -262,6 +280,20 @@ pub fn plan(
             ReconcileState::DestinationOnly => summary.destination_only += 1,
         }
     }
+
+    Log::info(
+        "reconcile",
+        &format!(
+            "plan finished: {} verified, {} partial, {} missing, {} moved, {} conflict, {} blocked, {} destination-only",
+            summary.verified,
+            summary.partial,
+            summary.missing,
+            summary.moved,
+            summary.conflict,
+            summary.blocked,
+            summary.destination_only
+        ),
+    );
 
     Ok(ReconcilePlan {
         source_root: source_root.to_path_buf(),

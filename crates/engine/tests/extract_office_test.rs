@@ -21,6 +21,23 @@ fn write_zip_entries(path: &Path, entries: &[(String, String)]) {
     zip.finish().unwrap();
 }
 
+/// Same as `write_zip_entries`, but for raw (non-text) entries - used to add
+/// fake embedded-media bytes (`word/media/...`, `ppt/media/...`,
+/// `xl/media/...`) alongside a document's normal text entries.
+fn write_zip_entries_bytes(path: &Path, entries: &[(String, Vec<u8>)]) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let file = fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+    for (name, content) in entries {
+        zip.start_file(name.as_str(), options).unwrap();
+        zip.write_all(content).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
 fn write_docx(dir: &Path, file_name: &str, paragraphs: &[&str]) -> PathBuf {
     let body: String = paragraphs
         .iter()
@@ -58,6 +75,15 @@ fn write_pptx(dir: &Path, file_name: &str, slides: &[&str]) -> PathBuf {
 }
 
 fn write_xlsx(dir: &Path, file_name: &str, rows: &[[&str; 2]]) -> PathBuf {
+    let path = dir.join(file_name);
+    write_zip_entries(&path, &xlsx_entries(rows));
+    path
+}
+
+/// The minimal valid set of xlsx parts for one sheet - factored out so a
+/// test can add extra entries (embedded media) alongside them without
+/// duplicating this boilerplate.
+fn xlsx_entries(rows: &[[&str; 2]]) -> Vec<(String, String)> {
     let content_types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
         <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
         <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
@@ -96,18 +122,13 @@ fn write_xlsx(dir: &Path, file_name: &str, rows: &[[&str; 2]]) -> PathBuf {
          <sheetData>{rows_xml}</sheetData></worksheet>"
     );
 
-    let path = dir.join(file_name);
-    write_zip_entries(
-        &path,
-        &[
-            ("[Content_Types].xml".to_string(), content_types),
-            ("_rels/.rels".to_string(), root_rels),
-            ("xl/workbook.xml".to_string(), workbook_xml),
-            ("xl/_rels/workbook.xml.rels".to_string(), workbook_rels),
-            ("xl/worksheets/sheet1.xml".to_string(), sheet_xml),
-        ],
-    );
-    path
+    vec![
+        ("[Content_Types].xml".to_string(), content_types),
+        ("_rels/.rels".to_string(), root_rels),
+        ("xl/workbook.xml".to_string(), workbook_xml),
+        ("xl/_rels/workbook.xml.rels".to_string(), workbook_rels),
+        ("xl/worksheets/sheet1.xml".to_string(), sheet_xml),
+    ]
 }
 
 #[test]
@@ -240,6 +261,31 @@ fn yaml_with_different_content_produces_different_tokens() {
 }
 
 #[test]
+fn malformed_yaml_falls_back_to_plain_text_instead_of_erroring() {
+    let tree = TempTree::new();
+    // Unterminated quoted scalar - yaml_rust2 errors scanning it, but the
+    // file still has real word content worth comparing.
+    let path = tree.write(
+        "bad.yaml",
+        b"name: 'the quick brown fox jumps over the lazy dog\n",
+    );
+    let same_words_txt = tree.write(
+        "same.txt",
+        b"name: 'the quick brown fox jumps over the lazy dog",
+    );
+
+    let doc_yaml = extract(&path, DocumentKind::Yaml).unwrap();
+    let doc_txt = extract(&same_words_txt, DocumentKind::PlainText).unwrap();
+
+    assert!(!doc_yaml.tokens.is_empty());
+    let overlap = doc_yaml.tokens.intersection(&doc_txt.tokens).count();
+    assert!(
+        overlap > 0,
+        "expected the fallback plain-text tokens to overlap with equivalent real text"
+    );
+}
+
+#[test]
 fn rtf_extraction_strips_control_words_and_keeps_body_text() {
     let tree = TempTree::new();
     let rtf = br#"{\rtf1\ansi\deff0
@@ -272,4 +318,131 @@ Second paragraph of real content here today\par
     let noise = tree.write("c.txt", b"Calibri Riched20 fonttbl generator");
     let doc_noise = extract(&noise, DocumentKind::PlainText).unwrap();
     assert!(doc.tokens.intersection(&doc_noise.tokens).next().is_none());
+}
+
+#[test]
+fn docx_with_no_media_has_an_empty_media_hash_list() {
+    let tree = TempTree::new();
+    let path = write_docx(tree.path(), "a.docx", &["no pictures here"]);
+    let doc = extract(&path, DocumentKind::Docx).unwrap();
+    assert!(doc.media_hashes.is_empty());
+}
+
+#[test]
+fn docx_extraction_collects_embedded_media_hashes() {
+    let tree = TempTree::new();
+    let path = tree.path().join("with_media.docx");
+    let document_xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body><w:p><w:r><w:t>hello</w:t></w:r></w:p></w:body></w:document>"
+        .to_string();
+    write_zip_entries_bytes(
+        &path,
+        &[
+            ("word/document.xml".to_string(), document_xml.into_bytes()),
+            (
+                "word/media/image1.png".to_string(),
+                b"fake-image-bytes-one".to_vec(),
+            ),
+            (
+                "word/media/image2.png".to_string(),
+                b"fake-image-bytes-two".to_vec(),
+            ),
+            // Not under word/media/ - must not be picked up as media.
+            ("word/theme/theme1.xml".to_string(), b"not media".to_vec()),
+        ],
+    );
+
+    let doc = extract(&path, DocumentKind::Docx).unwrap();
+    assert_eq!(doc.media_hashes.len(), 2);
+}
+
+#[test]
+fn pptx_extraction_collects_embedded_media_hashes() {
+    let tree = TempTree::new();
+    let path = tree.path().join("with_media.pptx");
+    let slide_xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+         xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+         <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>hello</a:t></a:r></a:p></p:txBody></p:sp>\
+         </p:spTree></p:cSld></p:sld>"
+        .to_string();
+    write_zip_entries_bytes(
+        &path,
+        &[
+            ("ppt/slides/slide1.xml".to_string(), slide_xml.into_bytes()),
+            (
+                "ppt/media/image1.png".to_string(),
+                b"fake-image-bytes-one".to_vec(),
+            ),
+            (
+                "ppt/media/image2.jpeg".to_string(),
+                b"fake-image-bytes-two".to_vec(),
+            ),
+        ],
+    );
+
+    let doc = extract(&path, DocumentKind::Pptx).unwrap();
+    assert_eq!(doc.media_hashes.len(), 2);
+}
+
+#[test]
+fn xlsx_extraction_collects_embedded_media_hashes() {
+    let tree = TempTree::new();
+    let path = tree.path().join("with_media.xlsx");
+    let mut entries: Vec<(String, Vec<u8>)> = xlsx_entries(&[["alice", "30"]])
+        .into_iter()
+        .map(|(name, text)| (name, text.into_bytes()))
+        .collect();
+    entries.push((
+        "xl/media/image1.png".to_string(),
+        b"fake-image-bytes-one".to_vec(),
+    ));
+    write_zip_entries_bytes(&path, &entries);
+
+    let doc = extract(&path, DocumentKind::Xlsx).unwrap();
+    assert_eq!(doc.media_hashes.len(), 1);
+}
+
+#[test]
+fn two_documents_with_the_same_embedded_image_share_a_media_hash() {
+    let tree = TempTree::new();
+    let shared_image = b"identical-image-bytes".to_vec();
+
+    let a_path = tree.path().join("a.pptx");
+    let slide_xml = |text: &str| {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+             <p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+             xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+             <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>\
+             </p:spTree></p:cSld></p:sld>"
+        )
+    };
+    write_zip_entries_bytes(
+        &a_path,
+        &[
+            (
+                "ppt/slides/slide1.xml".to_string(),
+                slide_xml("shared text").into_bytes(),
+            ),
+            ("ppt/media/image1.png".to_string(), shared_image.clone()),
+        ],
+    );
+
+    let b_path = tree.path().join("b.pptx");
+    write_zip_entries_bytes(
+        &b_path,
+        &[
+            (
+                "ppt/slides/slide1.xml".to_string(),
+                slide_xml("shared text").into_bytes(),
+            ),
+            ("ppt/media/image1.png".to_string(), shared_image),
+        ],
+    );
+
+    let doc_a = extract(&a_path, DocumentKind::Pptx).unwrap();
+    let doc_b = extract(&b_path, DocumentKind::Pptx).unwrap();
+    assert_eq!(doc_a.media_hashes, doc_b.media_hashes);
 }

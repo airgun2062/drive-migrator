@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
+use crate::applog::Log;
 use crate::error::{EngineError, Result};
 use crate::hash;
 use crate::scan;
@@ -101,6 +102,10 @@ pub fn write_manifest(
     destination_root: &Path,
     source_root: Option<&Path>,
 ) -> Result<ManifestWriteResult> {
+    Log::info(
+        "manifest",
+        &format!("write_manifest started: {}", destination_root.display()),
+    );
     let files = collect_file_records(destination_root)?;
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
     let file_count = files.len();
@@ -138,6 +143,13 @@ pub fn write_manifest(
     write_protected(&backup_checksum_path(destination_root), sha256.as_bytes())?;
 
     let app_local_hash_recorded = record_app_local_hash(destination_root, &sha256)?;
+
+    Log::info(
+        "manifest",
+        &format!(
+            "write_manifest finished: {file_count} files, {duplicate_group_count} duplicate groups, {version_family_count} version families"
+        ),
+    );
 
     Ok(ManifestWriteResult {
         file_count,
@@ -188,7 +200,23 @@ pub struct VerifyReport {
 /// Re-scans the destination and reports what changed since the manifest was
 /// written: files moved, renamed, changed, or deleted (SPEC.md section 8).
 pub fn verify(destination_root: &Path) -> Result<VerifyReport> {
+    Log::info(
+        "manifest",
+        &format!("verify started: {}", destination_root.display()),
+    );
     let integrity = check_integrity(destination_root);
+    if !integrity.trusted {
+        Log::error(
+            "manifest",
+            &format!(
+                "integrity check untrusted for {}: visible={:?} backup={:?} app_local={:?}",
+                destination_root.display(),
+                integrity.visible_hash,
+                integrity.backup_hash,
+                integrity.app_local_hash
+            ),
+        );
+    }
     let manifest_created_unix_ms = read_created_unix_ms(destination_root)?;
     let recorded = read_db_files(destination_root)?;
     let current = collect_file_records(destination_root)?;
@@ -245,6 +273,17 @@ pub fn verify(destination_root: &Path) -> Result<VerifyReport> {
     changed.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     moved.sort_by(|a, b| a.recorded_path.cmp(&b.recorded_path));
     deleted.sort();
+
+    Log::info(
+        "manifest",
+        &format!(
+            "verify finished: {unchanged} unchanged, {} changed, {} moved, {} deleted, {} unrecorded",
+            changed.len(),
+            moved.len(),
+            deleted.len(),
+            unrecorded.len()
+        ),
+    );
 
     Ok(VerifyReport {
         destination_root: destination_root.to_path_buf(),
